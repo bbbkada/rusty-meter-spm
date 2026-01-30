@@ -1,8 +1,13 @@
+## Fork notice – OWON SPM series
+
+This repository is a fork of **Rusty_meter**, adapted for the **OWON SPM series** of instruments.
+
+- Developed and tested on **OWON SPM6103**
+- Expected to work on other SPM models using similar SCPI command sets
+- **Multimeter functionality only**
+- Power supply features of the SPM series are **not implemented**
+
 # RustyMeter
-
-If you like this, a small donation is appreciated:
-
-[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/R6R8DQO8C)
 
 RustyMeter is a GUI application written in Rust powered by the awesome egui framework and builds
 on the work of @TheHWCave to turn your OWON XDM multimeter into a PC-based powerhouse
