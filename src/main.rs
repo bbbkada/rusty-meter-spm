@@ -32,12 +32,12 @@ fn main() -> eframe::Result<()> {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1024.0, 1000.0])
             .with_min_inner_size([300.0, 220.0])
-            .with_title("RustyMeter")
+            .with_title("RustyMeter - SPM")
             .with_icon(load_icon()),
         ..Default::default()
     };
     eframe::run_native(
-        "RustyMeter",
+        "RustyMeter - SPM",
         native_options,
         Box::new(|cc| {
             // This gives us image support:
