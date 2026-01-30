@@ -7,6 +7,9 @@ This repository is a fork of **Rusty_meter**, adapted for the **OWON SPM series*
 - **Multimeter functionality only**
 - Power supply features of the SPM series are **not implemented**
 
+Compatibility with **OWON XDM series** instruments is untested.
+Some effort has been made to keep the hardware layer modular, but I don't have an XDM instrument to test with.
+
 # RustyMeter
 
 RustyMeter is a GUI application written in Rust powered by the awesome egui framework and builds
