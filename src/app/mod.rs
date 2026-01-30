@@ -12,7 +12,7 @@ use mio::{Events, Poll};
 use mio_serial::{SerialPortInfo, SerialStream};
 use tokio::sync::{mpsc, oneshot};
 
-use crate::multimeter::{MeterMode, RangeCmd, RateCmd, ScpiMode};
+use crate::multimeter::{DeviceType, MeterMode, RateCmd, ScpiMode};
 
 // Submodules for split impl blocks
 mod graph;
@@ -80,6 +80,7 @@ pub struct MyApp {
     cont_threshold: u32,           // Persistent continuity threshold (0-1000 ohms)
     diod_threshold: f32,           // Persistent diode threshold (0-3.0 volts)
     lock_remote: bool,             // Persistent, whether to lock meter in remote mode
+    hold_enabled: bool,            // Persistent, whether hold mode is enabled
     curr_rate: usize,              // Persistent, current sampling rate index
     reverse_graph: bool,           // Persistent, whether to reverse graph direction
     graph_line_color: Color32,     // Persistent, color for graph line
@@ -129,6 +130,8 @@ pub struct MyApp {
     #[serde(skip)]
     device: Arc<Mutex<String>>, // Changed to shared ownership
     #[serde(skip)]
+    device_type: Arc<Mutex<DeviceType>>, // Detected device type for command routing
+    #[serde(skip)]
     ports: Vec<SerialPortInfo>,
     #[serde(skip)]
     tempdir: Option<tempfile::TempDir>,
@@ -139,9 +142,9 @@ pub struct MyApp {
     #[serde(skip)]
     ratecmd: RateCmd,
     #[serde(skip)]
-    rangecmd: Option<RangeCmd>,
-    #[serde(skip)]
     curr_range: usize,
+    #[serde(skip)]
+    pending_mode_change: Option<MeterMode>, // Track mode being changed to, ignore range updates during transition
     #[serde(skip)]
     serial_rx: Option<mpsc::Receiver<Option<f64>>>, // handle measurements
     #[serde(skip)]
@@ -151,9 +154,13 @@ pub struct MyApp {
     #[serde(skip)]
     mode_rx: Option<mpsc::Receiver<MeterMode>>, // Channel for mode updates
     #[serde(skip)]
+    range_rx: Option<mpsc::Receiver<(MeterMode, usize)>>, // Channel for (mode, range_index) updates
+    #[serde(skip)]
     value_debug_shared: Arc<Mutex<bool>>, // Shared debug flag for live updates
     #[serde(skip)]
     poll_interval_shared: Arc<Mutex<u64>>, // Shared poll interval for live updates
+    #[serde(skip)]
+    hold_enabled_shared: Arc<Mutex<bool>>, // Shared hold flag for pausing measurements
     #[serde(skip)]
     graph_update_interval_shared: Arc<Mutex<u64>>, // Shared graph update interval
     #[serde(skip)]
@@ -212,18 +219,19 @@ impl Default for MyApp {
             events: Events::with_capacity(1),
             serial: None,
             device: Arc::new(Mutex::new("".to_owned())), // Initialize as shared
+            device_type: Arc::new(Mutex::new(DeviceType::Unknown)), // Initialize as Unknown
             ports: vec![],
             tempdir: tempfile::Builder::new().prefix("rustymeter").tempdir().ok(),
             settings_open: false,
             is_init: false,
             ratecmd: RateCmd::default(),
             curr_rate: 0,
-            rangecmd: Some(RangeCmd::default()),
             curr_range: 0,
+            pending_mode_change: None,
             reverse_graph: false, // Default to right-to-left (most recent on right)
             graph_line_color: Color32::from_rgb(0, 255, 255), // Default to cyan (#00FFFF)
-            hist_bar_color: Color32::from_rgb(0, 255, 255), // Default to cyan (#00FFFF)
-            measurement_font_color: Color32::from_rgb(0, 255, 255), // Default to cyan (#00FFFF)
+            hist_bar_color: Color32::from_rgb(0, 255, 0), // Default to green
+            measurement_font_color: Color32::from_rgb(0, 255, 255), // Default to cyan
             box_background_color: Color32::from_rgba_unmultiplied(0, 0, 0, 255), // Default to black
             recording_open: false, // Always start closed
             recording_format: RecordingFormat::Csv,
@@ -238,15 +246,18 @@ impl Default for MyApp {
             serial_tx: None,
             shutdown_tx: None, // Initially no shutdown signal
             mode_rx: None,     // Initially no mode update channel
+            range_rx: None,    // Initially no range update channel
             poll_interval_ms: 20,
             graph_update_interval_ms: 20, // Default to 20ms for ~50 FPS
             graph_update_interval_max: 1000, // Default maximum of 1000ms
             beeper_enabled: true,         // Default to on, per meter spec
             cont_threshold: 50,           // Default continuity threshold: 50 ohms
             diod_threshold: 2.0,          // Default diode threshold: 2.0 volts (mid-range)
+            hold_enabled: false,          // Default hold off
             lock_remote: true,            // Default to locking remote mode
             value_debug_shared: Arc::new(Mutex::new(false)),
             poll_interval_shared: Arc::new(Mutex::new(20)),
+            hold_enabled_shared: Arc::new(Mutex::new(false)), // Default hold off
             graph_update_interval_shared: Arc::new(Mutex::new(20)), // Default shared value to 20ms
             last_graph_update: 0.0,                                 // Initialize to 0
             last_hist_collect_time: 0.0,                            // Initialize to 0
@@ -317,31 +328,55 @@ impl MyApp {
         &mut self,
         mode: MeterMode,
         unit: &str,
-        cmd: &str,
-        range_type: Option<&str>,
+        _legacy_cmd: &str, // Keep for backward compatibility but unused
+        _range_type: Option<&str>, // Not used anymore - ranges from device_plugin
         beeper_enabled: Option<bool>,
+        _saved_range_idx: Option<usize>, // Kept for backward compatibility; range now sent from ui.rs
     ) {
+        self.pending_mode_change = Some(mode); // Mark mode change as pending
         self.metermode = mode;
         self.curr_unit = unit.to_owned();
-        self.confstring = cmd.to_owned();
+        
+        // Reset curr_range to 0 (AUTO) when changing modes
+        // Instrument will report actual range after mode change completes
+        self.curr_range = 0;
+        
+        let device_type = self.device_type.lock().unwrap();
+        let mode_cmd = device_type.mode_cmd(mode);
+        let supports_beeper = device_type.plugin().supports_beeper();
+        let supports_threshold = device_type.plugin().supports_threshold();
+        
+        // NOTE: Range command is now sent from ui.rs when mode change is confirmed by instrument
+        // (saved_range_idx is kept in function signature for backward compatibility)
+        drop(device_type); // Release the lock
+        
+        self.confstring = mode_cmd.clone();
+        
         if let Some(tx) = self.serial_tx.clone() {
-            let mode_cmd = self.confstring.clone();
             let value_debug = self.value_debug;
             let cont_threshold = self.cont_threshold;
             let diod_threshold = self.diod_threshold;
             if let Some(beep) = beeper_enabled {
-                let beeper_cmd = if beep {
-                    "SYST:BEEP:STATe ON\n".to_string()
+                let beeper_cmd = if supports_beeper {
+                    if beep {
+                        Some("SYST:BEEP:STATe ON\n".to_string())
+                    } else {
+                        Some("SYST:BEEP:STATe OFF\n".to_string())
+                    }
                 } else {
-                    "SYST:BEEP:STATe OFF\n".to_string()
+                    None
                 };
-                let threshold_cmd = if mode == MeterMode::Cont {
-                    format!("CONT:THREshold {}\n", cont_threshold)
+                let threshold_cmd = if supports_threshold {
+                    if mode == MeterMode::Cont {
+                        Some(format!("CONT:THREshold {}\n", cont_threshold))
+                    } else {
+                        Some(format!("DIOD:THREshold {}\n", diod_threshold))
+                    }
                 } else {
-                    format!("DIOD:THREshold {}\n", diod_threshold)
+                    None
                 };
                 tokio::spawn(async move {
-                    // Queue commands without delays
+                    // Queue mode command
                     if let Err(e) = tx.send(mode_cmd.clone()).await {
                         if value_debug {
                             println!("Failed to queue mode command: {}", e);
@@ -349,37 +384,48 @@ impl MyApp {
                     } else if value_debug {
                         println!("Mode command queued: {}", mode_cmd);
                     }
-                    if let Err(e) = tx.send(beeper_cmd.clone()).await {
-                        if value_debug {
-                            println!("Failed to queue beeper command: {}", e);
+                    
+                    // NOTE: Range command is now sent from ui.rs when mode change is confirmed by instrument
+                    
+                    // Queue beeper command if supported
+                    if let Some(cmd) = beeper_cmd {
+                        if let Err(e) = tx.send(cmd.clone()).await {
+                            if value_debug {
+                                println!("Failed to queue beeper command: {}", e);
+                            }
+                        } else if value_debug {
+                            println!("Beeper command queued: {}", cmd);
                         }
-                    } else if value_debug {
-                        println!("Beeper command queued: {}", beeper_cmd);
                     }
-                    if let Err(e) = tx.send(threshold_cmd.clone()).await {
-                        if value_debug {
-                            println!("Failed to queue threshold command: {}", e);
+                    
+                    // Queue threshold command if supported
+                    if let Some(cmd) = threshold_cmd {
+                        if let Err(e) = tx.send(cmd.clone()).await {
+                            if value_debug {
+                                println!("Failed to queue threshold command: {}", e);
+                            }
+                        } else if value_debug {
+                            println!("Threshold command queued: {}", cmd);
                         }
-                    } else if value_debug {
-                        println!("Threshold command queued: {}", threshold_cmd);
                     }
                 });
             } else {
                 tokio::spawn(async move {
+                    // Queue mode command
                     if let Err(e) = tx.send(mode_cmd.clone()).await {
                         if value_debug {
-                            println!("Failed to queue command: {}", e);
+                            println!("Failed to queue mode command: {}", e);
                         }
                     } else if value_debug {
-                        println!("Command queued: {}", mode_cmd);
+                        println!("Mode command queued: {}", mode_cmd);
                     }
+                    
+                    // NOTE: Range command is now sent from ui.rs when mode change is confirmed by instrument
                 });
             }
         }
         self.values = VecDeque::with_capacity(self.mem_depth);
         self.hist_values = VecDeque::with_capacity(self.hist_mem_depth); // Reset histogram buffer
-        self.rangecmd = range_type.and_then(|rt| RangeCmd::new(&self.curr_meter, rt));
-        self.curr_range = 0;
     }
 
     // Method to handle disconnection

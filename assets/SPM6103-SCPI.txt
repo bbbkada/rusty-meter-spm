@@ -1,0 +1,1016 @@
+8
+
+OUTP ON
+
+(2)
+ 
+The command below
+ 
+queries if the
+ 
+channel
+ 
+is on. If the channels is on,
+
+retur
+n 1, otherwise return 0.
+
+OUTP?
+
+Returns
+
+1
+
+CURRent
+
+Syntax
+
+[SOURce:]CURRent[:LEVel][:IMMediate][:AMPLitude]
+<value>
+
+[SOURce:]CURRent[:LEVel][:IMMediate][:AMPLitude]?
+
+Description
+
+Sets
+ 
+and queries the current
+ 
+of
+ 
+the channel
+.
+
+Parameter
+
+v
+alue
+: Current setting
+ 
+va
+lue
+
+Example
+
+(1)
+ 
+The command below
+ 
+set
+s
+ 
+the
+ 
+current
+ 
+of the channel
+ 
+to 1
+A.
+
+CURR 1
+
+(2)
+ 
+The command below
+ 
+queries
+ 
+the current setting value of the channel.
+
+CURR?
+
+Returns
+
+1.000
+
+CURRent:LIMit
+
+Syntax
+
+[SOURce:]CURRent:LIMit[:LEVel][:IMMediate][:AMPLitude]
+<value>
+
+[SOURc
+e:]CURRent:LIMit[:LEVel][:IMMediate][:AMPLitude]?
+
+Description
+
+Sets
+ 
+and queries the
+ 
+overcurrent protection (OCP) value of
+ 
+the channel
+.
+
+Parameter
+
+value
+:
+ 
+Overcurrent protection (OCP) value
+
+Example
+
+(1)
+ 
+The command below
+ 
+set
+s
+ 
+the overcurrent protection (OCP) value
+ 
+of
+
+the channel
+ 
+to 1
+A.
+
+CURR:LIM 1
+
+(2)
+ 
+The command below
+ 
+queries
+ 
+the
+ 
+overcurrent protection (OCP) value
+
+of the channel.
+9
+
+CURR:LIM?
+
+Returns
+
+1.000
+
+VOLTage
+
+Syntax
+
+[SOURce:]VOLTage[:LEVel][:IMMediate][:AMPLitude]
+ 
+<value>
+
+[SOURce:]VOLTage[:LEVel][:IMMediate][:AMPLit
+ude]?
+
+Description
+
+Sets
+ 
+and queries the voltage
+ 
+of
+ 
+the channel
+.
+
+Parameter
+
+value
+: Voltage
+ 
+setting value
+
+Example
+
+(1)
+ 
+The command below
+ 
+set
+s
+ 
+the
+ 
+voltage
+ 
+of the channel
+ 
+to 1
+V.
+
+VOLT 1
+
+(2)
+ 
+The command below
+ 
+queries
+ 
+the voltage setting value of the channel.
+
+VOLT?
+
+Returns
+
+1.000
+
+VOLTage:LIMit
+
+Syntax
+
+[SOURce:]VOLTage:LIMit[:LEVel][:IMMediate][:AMPLitude]
+<value>
+
+[SOURce:]VOLTage:LIMit[:LEVel][:IMMediate][:AMPLitude]?
+
+Description
+
+Sets and queries the overvoltage protection (OVP) value of the channel.
+
+Parameter
+
+value: Overvolt
+age protection (OVP) value
+
+Example
+
+(1)
+ 
+The command below sets the overvoltage protection (OVP) value of
+
+the channel to 1V.
+
+VOLT:LIM 1
+
+(2)
+ 
+The command below queries the
+ 
+overvoltage protection (OVP) value
+
+of the channel.
+
+VOLT:LIM?
+
+Returns
+
+1.000
+10
+
+System
+ 
+control
+ 
+C
+omma
+nds
+
+SYSTem:LOCal
+
+Syntax
+
+SYSTem:
+LOCal
+
+Description
+
+This
+ 
+command
+ 
+is
+ 
+used
+ 
+to
+ 
+set
+ 
+the
+ 
+power
+ 
+supply
+ 
+to
+ 
+the
+ 
+local
+ 
+operating
+ 
+state.
+
+Example
+
+SYST:LOC
+
+SYSTem:REMote
+
+Syntax
+
+SYSTem:
+REMote
+
+Description
+
+This
+ 
+command
+ 
+is
+ 
+used
+ 
+to
+ 
+set
+ 
+the
+ 
+power
+ 
+supply
+ 
+to
+ 
+remote
+ 
+operation
+ 
+st
+atus.
+
+Example
+
+SYST:REM
+
+Multimeter
+ 
+SCPI Commands
+
+CONFigure:ALL?
+
+Syntax
+
+CONFigure:ALL?
+
+Description
+
+Query all customized parameter values for internal software use.
+
+Parameter
+
+(none)
+
+Format
+：
+Measurement type, measurement value, measurement status,
+gear
+ 
+status.
+
+Example
+
+VOLT:DC,+0.0011V,AUTO,2V
+
+RES,+000.26Ohm,AUTO,200Ohm
+
+CURR:DC,+000.00mA,Manual,200mA
+11
+
+CONFigure?
+
+Syntax
+
+CONFigure?
+
+Descriptio
+n
+
+Query configuration function and measurement value, scientific counting
+
+method display
+.
+
+Parameter
+
+(none)
+
+Example
+
+RES +2.20
+00E
+-
+01
+
+VOLT:DC +4.0000E
+-
+04
+
+Unit
+：
+VOLTage
+---
+V
+
+CURRent
+---
+A
+
+RESistance
+---
+Ω
+
+CAPacitance
+---
+F
+
+SENSe
+ 
+Subsystem
+
+[SENSe:]FUNCtion VOLTage
+
+Syntax
+
+[SENSe:]FUNCtion:VOLTage
+?
+
+Description
+
+Query the current voltage measurement function.
+
+Parameter
+
+(none)
+
+Exam
+ple
+
+[SENSe:]FUNCtion:VOLTage:AC
+
+[SENSe:]FUNCtion:VOLTage[:DC]
+
+Switch to AC voltage gear for measurement
+
+Switch to DC voltage gear for measurement
+
+Returns
+
+VOLT:AC
+
+VOLT:DC
+12
+
+[SENSe:]FUNCtion CURRent
+
+Syntax
+
+[SENSe:]FUNCtion:CURRent
+?
+
+Description
+
+Query the curre
+nt measurement function.
+
+Parameter
+
+(none)
+
+Example
+
+[SENSe:]FUNCtion:CURRent:AC
+
+[SENSe:]FUNCtion:CURRent[:DC]
+
+Switch to AC current gear for measurement
+
+Switch to DC current gear for measurement
+
+Returns
+
+CURR:AC
+
+CURR:DC
+
+[SENSe:]FUNCtion RESistance
+
+Syntax
+
+[SEN
+Se:]FUNCtion:RESistance
+？
+
+Description
+
+Query the current resistance measurement function
+.
+
+Parameter
+
+(none)
+
+Example
+
+[SENSe:]FUNCtion:RESistance
+
+Switch to resistance gear for measurement
+
+Returns
+
+RES
+
+[SENSe:]FUNCtion CAPacitance
+
+Syntax
+
+[SENSe:]FUNCtion:CAP
+acitance
+?
+
+Description
+13
+
+Query the current capacitance measurement function.
+
+Parameter
+
+(none)
+
+Example
+
+[SENSe:]FUNCtion:CAPacitance
+
+Switch to capacitance gear measurement
+
+Returns
+
+CAP
+
+[SENSe:]FUNCtion DIODe
+
+Syntax
+
+[SENSe:]FUNCtion:DIODe
+?
+
+Description
+
+Query
+ 
+the current diode measurement function.
+
+Parameter
+
+(none)
+
+Example
+
+[SENSe:]FUNCtion:DIODe
+
+Switch to diode gear measurement
+
+Returns
+
+DIOD
+
+[SENSe:]FUNCtion CONTinuity
+
+Syntax
+
+[SENSe:]FUNCtion:CONTinuity
+?
+
+Description
+
+Query the current continuity measurement func
+tion.
+
+Parameter
+
+(none)
+
+Example
+
+[SENSe:]FUNCtion:CONTinuity
+
+Switch to continuity gear measurement
+
+Returns
+
+CONT
+14
+
+[SENSe:]VOLTage RANGe
+
+Syntax
+
+[SENSe:]VOLTage:AC:RANGe {<range>|MINimum|MAXimum}
+
+[SENSe:]VOLTage:DC:RANGe {<range>|MINimum|MAXimum}
+
+[SENSe:]VOLTag
+e:AC:RANGe?
+
+[SENSe:]VOLTage:DC:RANGe?
+
+Description
+
+Voltage measurement choose fixed measuring range,
+ 
+and it can only be
+
+effectively set after function gear is correctly set
+.
+
+Parameter
+
+Name
+ 
+Type
+ 
+Range
+
+<range>
+ 
+Discrete
+
+type
+
+AC: 200E
+-
+3(200mV), 2(2V), 20(20V),
+ 
+200(200V), 750(750V)
+
+DC: 200E
+-
+3(200mV), 2(2V), 20(20V), 200(200V), 1000(1000V)
+
+Example
+
+VOLTage:AC:RANGe 200
+
+Syntax
+
+[SENSe:]VOLTage:AC:RANGe:AUTO {OFF,0|ON,1}
+
+[SENSe:]VOLTage:DC:RANGe:AUTO {OFF,0|ON,1}
+
+[SENSe:]VOLTage:AC:RANGe:AUTO?
+
+[SENSe:]VOLTage:DC:R
+ANGe:AUTO?
+
+Description
+
+Disable or enable automatic range adjustment for voltage measurement.
+
+Parameter
+
+Name
+ 
+Type
+ 
+Range
+ 
+Default Value
+
+{0|1|ON|OFF}
+ 
+Bool
+ 
+0|1|ON|OFF
+ 
+OFF
+
+Syntax
+
+[SENSe:]VOLTage:AC:RANGe:NULL {OFF,0|ON,1}
+
+[SENSe:]VOLTage:DC:RANGe:NULL {OFF,
+0|ON,1}
+
+[SENSe:]VOLTage:AC:RANGe:NULL?
+
+[SENSe:]VOLTage:DC:RANGe:NULL?
+
+Description
+
+Voltage measurement enables or disables relative values.
+
+Parameter
+15
+
+Name
+ 
+Type
+ 
+Range
+ 
+Default Value
+
+{0|1|ON|OFF}
+ 
+Bool
+ 
+0|1|ON|OFF
+ 
+OFF
+
+[SENSe:]CURRent RANGe
+
+Syntax
+
+[SENSe:]CUR
+Rent:AC:RANGe {<range>|MINimum|MAXimum}
+
+[SENSe:]CURRent:DC:RANGe {<range>|MINimum|MAXimum}
+
+[SENSe:]CURRent:AC:RANGe?
+
+[SENSe:]CURRent:DC:RANGe?
+
+Description
+
+Current measurement choose fixed measuring range,
+ 
+and it can only be
+
+effectively set after function g
+ear is correctly set
+.
+
+Parameter
+
+Name
+ 
+Type
+ 
+Range
+
+<range>
+ 
+Discrete
+
+type
+
+AC: 200E
+-
+3(200mA), 10(10A)
+
+DC: 200E
+-
+3(200mA), 10(10A)
+
+Syntax
+
+[SENSe:]CURRent:AC:RANGe:NULL {OFF,0|ON,1}
+
+[SENSe:]CURRent:DC:RANGe:NULL {OFF,0|ON,1}
+
+[SENSe:]CURRent:AC:RANGe:NULL?
+
+[SEN
+Se:]CURRent:DC:RANGe:NULL?
+
+Description
+
+Current measurement enables or disables relative values.
+
+Parameter
+
+Name
+ 
+Type
+ 
+Range
+ 
+Default Value
+
+{0|1|ON|OFF}
+ 
+Bool
+ 
+0|1|ON|OFF
+ 
+OFF
+
+[SENSe:]RESistance RANGe
+
+Syntax
+
+[SENSe:]RESistance:RANGe {<range>|MINimum|MAXimum}
+
+[SENSe:]RESistance:RANGe?
+
+Description
+16
+
+Resistance measurement choose fixed measuring range,
+ 
+and it can only
+
+be effectively set after function gear is correctly set
+.
+
+Parameter
+
+Name
+ 
+Type
+ 
+Range
+
+<range>
+ 
+Discrete
+
+type
+
+200(200
+Ω
+), 2E3(2K
+Ω
+), 20E3(20K
+Ω
+), 200E3(200K
+Ω
+), 2E6(2M
+
+Ω
+), 20E6(20M
+Ω
+), 100E6(100M
+Ω
+)
+
+Syntax
+
+[SENSe:]RESistance:RANGe:AUTO {OFF,0|ON,1}
+
+[SENSe:]RESistance:RANGe:AUTO
+
+[SENSe:]RESistance:RANGe:NULL? {OFF,0|ON,1}
+
+[SENSe:]RESistance:RANGe:NULL?
+
+Description
+
+Resistance measurement enables or disables rela
+tive values.
+
+Parameter
+
+Name
+ 
+Type
+ 
+Range
+ 
+Default Value
+
+{0|1|ON|OFF}
+ 
+Bool
+ 
+0|1|ON|OFF
+ 
+OFF
+
+[SENSe:]CAPacitance RANGe
+
+Syntax
+
+[SENSe:]CAPacitance:RANGe?
+
+[SENSe:]CAPacitance:NULL {OFF,0|ON,1}
+
+[SENSe:]CAPacitance:NULL?
+
+Description
+
+Query current measurement.
+
+Par
+ameter
+
+Name
+ 
+Type
+ 
+Range
+
+Return
+ 
+Discrete
+
+type
+
+2E
+-
+9(2nF), 20E
+-
+9(20nF), 200E
+-
+9(200nF), 2E
+-
+6(2uF), 20E
+-
+6(20uF),
+
+200E
+-
+6(200uF), 10E
+-
+3(10mF)
+
+MULTimeter
+
+Syntax
+
+MULTimeter:HOLD {OFF,0|ON,1}
+
+MULTimeter:HOLD?
+17
+
+Description
+
+Enables or disables holding measurements.
+
+P
+arameter
+
+Name
+ 
+Type
+ 
+Range
+ 
+Default Value
+
+{0|1|ON|OFF}
+ 
+Bool
+ 
+0|1|ON|OFF
+ 
+OFF
+
+SLMulation
+
+Syntax
+
+Knob emulation instruction
+
+SIMulation:KEY:KNOB {<value>}
+
+Description
+
+Function key simulation.
+
+Parameter
+
+Value
+--
+Positive
+ 
+or
+ 
+negative numbers
+.
+ 
+It is the number fo
+r left or right knob
+
+rotating steps.
+
+Example
+
+SIMulation:KEY:DISP
+
+SIMulation:KEY:V
+
+SIMulation:KEY:I
+
+SIMulation:KEY:OVP
+
+SIMulation:KEY:OCP
+
+SIMulation:KEY:ONOFf
+
+SIMulation:KEY:OK
+
+SIMulation:KEY:MODE
+
+SIMulation:KEY:F1
+
+SIMulation:KEY:F2
+
+SIMulation:KEY:F3
+
+SIMula
+tion:KEY:F4

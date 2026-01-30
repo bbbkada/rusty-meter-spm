@@ -3,5 +3,6 @@
 
 mod app;
 pub use app::MyApp;
+mod device_plugin;
 mod helpers;
 mod multimeter;

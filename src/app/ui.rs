@@ -5,7 +5,7 @@ use mio_serial::{DataBits, SerialPort, SerialPortBuilderExt};
 use std::collections::VecDeque;
 
 use crate::helpers::{format_measurement, powered_by};
-use crate::multimeter::{GenScpi, MeterMode, RangeCmd};
+use crate::multimeter::{GenScpi, MeterMode};
 
 // Enum to represent tab types
 #[derive(Clone, PartialEq)]
@@ -88,6 +88,37 @@ impl super::MyApp {
     /// Called each time the UI needs repainting, which may be many times per second.
     pub fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let is_web = cfg!(target_arch = "wasm32");
+        
+        // Handle spacebar to toggle hold
+        if ctx.input(|i| i.key_pressed(egui::Key::Space)) {
+            self.hold_enabled = !self.hold_enabled;
+            *self.hold_enabled_shared.lock().unwrap() = self.hold_enabled;
+            println!("Hold toggled via spacebar: {}", self.hold_enabled);
+            // Reset last_graph_update when resuming to allow immediate update
+            if !self.hold_enabled {
+                self.last_graph_update = 0.0;
+            }
+            // Only send hardware hold command if device supports it
+            let supports_hold = self.device_type.lock().unwrap().plugin().supports_hold();
+            println!("Device supports hold: {}", supports_hold);
+            if supports_hold {
+                if let Some(tx) = self.serial_tx.clone() {
+                    let cmd = if self.hold_enabled {
+                        "MULT:HOLD ON\n".to_string()
+                    } else {
+                        "MULT:HOLD OFF\n".to_string()
+                    };
+                    println!("Sending hold command: {:?}", cmd);
+                    tokio::spawn(async move {
+                        if let Err(e) = tx.send(cmd).await {
+                            println!("Failed to queue hold command: {}", e);
+                        }
+                    });
+                } else {
+                    println!("serial_tx is None, cannot send hold command");
+                }
+            }
+        }
 
         // On startup, handle certain items once
         if !self.is_init {
@@ -114,6 +145,33 @@ impl super::MyApp {
             // Initialize dock state
             let tabs = vec![PlotTab::Graph, PlotTab::Histogram];
             self.plot_dock_state = DockState::new(tabs);
+            
+            // Auto-connect if enabled and serial port is configured
+            if self.connect_on_startup && !self.serial_port.is_empty() {
+                self.connection_state = super::ConnectionState::Connecting;
+                self.connection_error = None;
+                match mio_serial::new(&self.serial_port, self.baud_rate)
+                    .open_native_async()
+                {
+                    Ok(serial) => {
+                        self.serial = Some(serial);
+                        if let Some(ref mut serial) = self.serial {
+                            let _ = serial.set_data_bits(DataBits::Eight);
+                            let _ = serial.set_stop_bits(mio_serial::StopBits::One);
+                            let _ = serial.set_parity(mio_serial::Parity::None);
+                            self.connection_state = super::ConnectionState::Connected;
+                            self.spawn_serial_task();
+                            self.spawn_graph_update_task(ctx.clone());
+                        }
+                    }
+                    Err(e) => {
+                        self.connection_state = super::ConnectionState::Disconnected;
+                        self.connection_error =
+                            Some(format!("Failed to auto-connect: {}", e));
+                    }
+                }
+            }
+            
             self.is_init = true;
         }
 
@@ -121,6 +179,9 @@ impl super::MyApp {
         if let Some(ref mut rx) = self.serial_rx {
             while let Ok(meas_opt) = rx.try_recv() {
                 if let Some(meas) = meas_opt {
+                    if self.value_debug {
+                        println!("UI received measurement: {}", meas);
+                    }
                     self.curr_meas = meas; // Update curr_meas with new data
                 }
             }
@@ -136,61 +197,92 @@ impl super::MyApp {
                     match mode {
                         MeterMode::Vdc => {
                             self.curr_unit = "VDC".to_owned();
-                            self.rangecmd = RangeCmd::new(&self.curr_meter, "VDC");
                         }
                         MeterMode::Vac => {
                             self.curr_unit = "VAC".to_owned();
-                            self.rangecmd = RangeCmd::new(&self.curr_meter, "VAC");
                         }
                         MeterMode::Adc => {
                             self.curr_unit = "ADC".to_owned();
-                            self.rangecmd = RangeCmd::new(&self.curr_meter, "ADC");
                         }
                         MeterMode::Aac => {
                             self.curr_unit = "AAC".to_owned();
-                            self.rangecmd = RangeCmd::new(&self.curr_meter, "AAC");
                         }
                         MeterMode::Res => {
                             self.curr_unit = "Ohm".to_owned();
-                            self.rangecmd = RangeCmd::new(&self.curr_meter, "RES");
                         }
                         MeterMode::Cap => {
                             self.curr_unit = "F".to_owned();
-                            self.rangecmd = RangeCmd::new(&self.curr_meter, "CAP");
                         }
                         MeterMode::Freq => {
                             self.curr_unit = "Hz".to_owned();
-                            self.rangecmd = None;
                         }
                         MeterMode::Per => {
                             self.curr_unit = "s".to_owned();
-                            self.rangecmd = None;
                         }
                         MeterMode::Diod => {
                             self.curr_unit = "V".to_owned();
-                            self.rangecmd = None;
                         }
                         MeterMode::Cont => {
                             self.curr_unit = "Ohm".to_owned();
-                            self.rangecmd = None;
                         }
                         MeterMode::Temp => {
                             self.curr_unit = "°C".to_owned();
-                            self.rangecmd = RangeCmd::new(&self.curr_meter, "TEMP");
                         }
                     }
-                    self.curr_range = 0;
+                    
                     if self.value_debug {
                         println!("Updated metermode to: {:?}", mode);
                     }
+                    
+                    // Reset curr_range to 0 (AUTO) for the new mode
+                    self.curr_range = 0;
+                    
+                    // Clear pending mode change flag - mode is now confirmed by instrument
+                    self.pending_mode_change = None;
+                    
+                    // Range index updates from instrument will now be accepted from the new mode
+                }
+            }
+        }
+        
+        // Handle range updates from serial task (from instrument)
+        // Always update curr_range to match what instrument reports
+        if let Some(rx) = &mut self.range_rx {
+            while let Ok((mode, range_idx)) = rx.try_recv() {
+                // Ignore range updates during mode transitions to prevent old mode's range leaking to new mode
+                if self.pending_mode_change.is_some() {
+                    if self.value_debug {
+                        println!("UI: Ignoring range update {} for mode {:?} during mode transition to {:?}", range_idx, mode, self.pending_mode_change);
+                    }
+                    continue;
+                }
+                
+                // Ignore range updates from old mode (stale data)
+                if mode != self.metermode {
+                    if self.value_debug {
+                        println!("UI: Ignoring stale range update {} for old mode {:?} (current mode: {:?})", range_idx, mode, self.metermode);
+                    }
+                    continue;
+                }
+                
+                if self.value_debug {
+                    println!("UI: Received range index update: {} for mode {:?}", range_idx, mode);
+                }
+                
+                // Update curr_range to reflect instrument state for current mode
+                self.curr_range = range_idx;
+                
+                if self.value_debug {
+                    println!("Updated curr_range to {} from instrument", range_idx);
                 }
             }
         }
 
         // Handle graph and histogram updates and recording based on the configured interval
+        // Skip updates when hold is enabled to freeze the graph
         let current_time = ctx.input(|i| i.time); // Get current time in seconds
         let graph_interval = *self.graph_update_interval_shared.lock().unwrap() as f64 / 1000.0; // Convert ms to seconds
-        if current_time - self.last_graph_update >= graph_interval {
+        if !self.hold_enabled && current_time - self.last_graph_update >= graph_interval {
             if !self.curr_meas.is_nan() {
                 self.values.push_back(self.curr_meas);
                 self.update_histogram(self.curr_meas); // Update histogram with new measurement
@@ -416,6 +508,7 @@ impl super::MyApp {
                     fill: self.box_background_color,
                     stroke: egui::Stroke::new(1.0, egui::Color32::GRAY),
                 };
+                
                 control_frame.show(ui, |ui| {
                     ui.vertical(|ui| {
                         let btn_size = Vec2 { x: 70.0, y: 20.0 };
@@ -430,6 +523,7 @@ impl super::MyApp {
                                     "CONF:VOLT:DC AUTO\n",
                                     Some("VDC"),
                                     None,
+                                    None,
                                 );
                             }
                             let vac_btn = egui::Button::new("VAC")
@@ -441,6 +535,7 @@ impl super::MyApp {
                                     "VAC",
                                     "CONF:VOLT:AC AUTO\n",
                                     Some("VAC"),
+                                    None,
                                     None,
                                 );
                             }
@@ -454,6 +549,7 @@ impl super::MyApp {
                                     "CONF:CURR:DC AUTO\n",
                                     Some("ADC"),
                                     None,
+                                    None,
                                 );
                             }
                             let aac_btn = egui::Button::new("AAC")
@@ -465,6 +561,7 @@ impl super::MyApp {
                                     "AAC",
                                     "CONF:CURR:AC AUTO\n",
                                     Some("AAC"),
+                                    None,
                                     None,
                                 );
                             }
@@ -480,6 +577,7 @@ impl super::MyApp {
                                     "CONF:RES AUTO\n",
                                     Some("RES"),
                                     None,
+                                    None,
                                 );
                             }
                             let cap_btn = egui::Button::new("C")
@@ -492,25 +590,29 @@ impl super::MyApp {
                                     "CONF:CAP AUTO\n",
                                     Some("CAP"),
                                     None,
+                                    None,
                                 );
                             }
                             let freq_btn = egui::Button::new("Freq")
                                 .selected(self.metermode == MeterMode::Freq)
                                 .min_size(btn_size);
-                            if ui.add(freq_btn).clicked() {
+                            let freq_supported = self.device_type.lock().unwrap().supports_mode(MeterMode::Freq);
+                            if ui.add_enabled(freq_supported, freq_btn).clicked() {
                                 self.set_mode(
                                     MeterMode::Freq,
                                     "Hz",
                                     "CONF:FREQ\n",
                                     Some("FREQ"),
                                     None,
+                                    None,
                                 );
                             }
                             let per_btn = egui::Button::new("Period")
                                 .selected(self.metermode == MeterMode::Per)
                                 .min_size(btn_size);
-                            if ui.add(per_btn).clicked() {
-                                self.set_mode(MeterMode::Per, "s", "CONF:PER\n", Some("PER"), None);
+                            let per_supported = self.device_type.lock().unwrap().supports_mode(MeterMode::Per);
+                            if ui.add_enabled(per_supported, per_btn).clicked() {
+                                self.set_mode(MeterMode::Per, "s", "CONF:PER\n", Some("PER"), None, None);
                             }
                         });
                         ui.horizontal(|ui| {
@@ -522,8 +624,9 @@ impl super::MyApp {
                                     MeterMode::Diod,
                                     "V",
                                     "CONF:DIOD\n",
-                                    Some("DIOD"),
+                                    None,
                                     Some(self.beeper_enabled),
+                                    None,
                                 );
                             }
                             let cont_btn = egui::Button::new("Cont")
@@ -534,21 +637,56 @@ impl super::MyApp {
                                     MeterMode::Cont,
                                     "Ohm",
                                     "CONF:CONT\n",
-                                    Some("CONT"),
+                                    None,
                                     Some(self.beeper_enabled),
+                                    None,
                                 );
                             }
                             let temp_btn = egui::Button::new("Temp")
                                 .selected(self.metermode == MeterMode::Temp)
                                 .min_size(btn_size);
-                            if ui.add(temp_btn).clicked() {
+                            let temp_supported = self.device_type.lock().unwrap().supports_mode(MeterMode::Temp);
+                            if ui.add_enabled(temp_supported, temp_btn).clicked() {
                                 self.set_mode(
                                     MeterMode::Temp,
                                     "°C",
-                                    "CONF:TEMP:RTD PT100\n",
+                                    "CONF:TEMP\n",
                                     Some("TEMP"),
                                     None,
+                                    None,
                                 );
+                            }
+                            let hold_btn = egui::Button::new("Hold")
+                                .selected(self.hold_enabled)
+                                .min_size(btn_size);
+                            if ui.add(hold_btn).clicked() {
+                                self.hold_enabled = !self.hold_enabled;
+                                *self.hold_enabled_shared.lock().unwrap() = self.hold_enabled;
+                                println!("Hold toggled via button: {}", self.hold_enabled);
+                                // Reset last_graph_update when resuming to allow immediate update
+                                if !self.hold_enabled {
+                                    self.last_graph_update = 0.0;
+                                }
+                                // Only send hardware hold command if device supports it
+                                let supports_hold = self.device_type.lock().unwrap().plugin().supports_hold();
+                                println!("Device supports hold: {}", supports_hold);
+                                if supports_hold {
+                                    if let Some(tx) = self.serial_tx.clone() {
+                                        let cmd = if self.hold_enabled {
+                                            "MULT:HOLD ON\n".to_string()
+                                        } else {
+                                            "MULT:HOLD OFF\n".to_string()
+                                        };
+                                        println!("Sending hold command: {:?}", cmd);
+                                        tokio::spawn(async move {
+                                            if let Err(e) = tx.send(cmd).await {
+                                                println!("Failed to queue hold command: {}", e);
+                                            }
+                                        });
+                                    } else {
+                                        println!("serial_tx is None, cannot send hold command");
+                                    }
+                                }
                             }
                         });
                     });
@@ -569,38 +707,18 @@ impl super::MyApp {
                 };
                 options_frame.show(ui, |ui| {
                     ui.vertical(|ui| {
-                        let ratebox = egui::ComboBox::from_label("Sampling Rate").show_index(
-                            ui,
-                            &mut self.curr_rate,
-                            self.ratecmd.len(),
-                            |i| self.ratecmd.get_opt(i).0,
-                        );
-                        if ratebox.changed() {
-                            self.confstring = self
-                                .ratecmd
-                                .gen_scpi(self.ratecmd.get_opt(self.curr_rate).0);
-                            if let Some(tx) = self.serial_tx.clone() {
-                                let cmd = self.confstring.clone();
-                                tokio::spawn(async move {
-                                    if let Err(e) = tx.send(cmd).await {
-                                        println!("Failed to queue command: {}", e);
-                                    }
-                                });
-                            }
-                            if self.value_debug {
-                                println!("Selected Rate changed: {}", self.confstring);
-                            }
-                        }
-                        if let Some(rangecmd) = &self.rangecmd {
-                            let rangebox = egui::ComboBox::from_label("Range").show_index(
+                        let rate_supported = self.device_type.lock().unwrap().supports_rate_control();
+                        ui.add_enabled_ui(rate_supported, |ui| {
+                            let ratebox = egui::ComboBox::from_label("Sampling Rate").show_index(
                                 ui,
-                                &mut self.curr_range,
-                                rangecmd.len(),
-                                |i| rangecmd.get_opt(i).0,
+                                &mut self.curr_rate,
+                                self.ratecmd.len(),
+                                |i| self.ratecmd.get_opt(i).0,
                             );
-                            if rangebox.changed() {
-                                self.confstring =
-                                    rangecmd.gen_scpi(rangecmd.get_opt(self.curr_range).0);
+                            if ratebox.changed() {
+                                self.confstring = self
+                                    .ratecmd
+                                    .gen_scpi(self.ratecmd.get_opt(self.curr_rate).0);
                                 if let Some(tx) = self.serial_tx.clone() {
                                     let cmd = self.confstring.clone();
                                     tokio::spawn(async move {
@@ -610,40 +728,95 @@ impl super::MyApp {
                                     });
                                 }
                                 if self.value_debug {
-                                    println!("Selected Range changed: {}", self.confstring);
+                                    println!("Selected Rate changed: {}", self.confstring);
                                 }
                             }
-                        }
-                        // Add beeper and threshold controls for CONT and DIOD modes
-                        if self.metermode == MeterMode::Cont || self.metermode == MeterMode::Diod {
-                            let mut beeper = self.beeper_enabled;
-                            if ui.checkbox(&mut beeper, "Beeper").changed() {
-                                self.beeper_enabled = beeper;
-                                if let Some(tx) = self.serial_tx.clone() {
-                                    let cmd = if beeper {
-                                        "SYST:BEEP:STATe ON\n".to_string()
-                                    } else {
-                                        "SYST:BEEP:STATe OFF\n".to_string()
-                                    };
-                                    let value_debug = self.value_debug;
-                                    tokio::spawn(async move {
-                                        if let Err(e) = tx.send(cmd).await {
-                                            if value_debug {
-                                                println!("Failed to queue beeper command: {}", e);
+                        });
+                        
+                        // Range control using plugin
+                        {
+                            let device_type = self.device_type.lock().unwrap();
+                            if let Some(range_info) = device_type.plugin().range_info(self.metermode) {
+                                // Clamp curr_range to valid index for this mode
+                                if self.curr_range >= range_info.ranges.len() {
+                                    self.curr_range = 0;
+                                }
+                                
+                                // Get current range text
+                                let current_text = range_info.ranges.get(self.curr_range)
+                                    .map(|r| r.0)
+                                    .unwrap_or("auto");
+                                
+                                let mut changed = false;
+                                // Use unique ID per mode to prevent egui from reusing state between modes
+                                let combo_id = format!("range_combo_{:?}", self.metermode);
+                                egui::ComboBox::from_id_salt(combo_id)
+                                    .selected_text(current_text)
+                                    .show_ui(ui, |ui| {
+                                        for (idx, (name, _)) in range_info.ranges.iter().enumerate() {
+                                            if ui.selectable_value(&mut self.curr_range, idx, *name).changed() {
+                                                changed = true;
                                             }
                                         }
                                     });
+                                
+                                if changed {
+                                    if let Some((_, scpi_val)) = range_info.ranges.get(self.curr_range) {
+                                        let scpi_cmd = format!("{}{}\n", range_info.scpi_prefix, scpi_val);
+                                        if self.value_debug {
+                                            println!("User selected range {}: {} - sending to instrument", self.curr_range, scpi_cmd.trim());
+                                        }
+                                        if let Some(tx) = self.serial_tx.clone() {
+                                            tokio::spawn(async move {
+                                                if let Err(e) = tx.send(scpi_cmd).await {
+                                                    println!("Failed to queue range command: {}", e);
+                                                }
+                                            });
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        
+                        // Add beeper and threshold controls for CONT and DIOD modes
+                        if self.metermode == MeterMode::Cont || self.metermode == MeterMode::Diod {
+                            let device_type = self.device_type.lock().unwrap();
+                            let supports_beeper = device_type.plugin().supports_beeper();
+                            let supports_threshold = device_type.plugin().supports_threshold();
+                            drop(device_type); // Release the lock early
+                            
+                            // Beeper control - only show if device supports it
+                            if supports_beeper {
+                                let mut beeper = self.beeper_enabled;
+                                if ui.checkbox(&mut beeper, "Beeper").changed() {
+                                    self.beeper_enabled = beeper;
+                                    if let Some(tx) = self.serial_tx.clone() {
+                                        let cmd = if beeper {
+                                            "SYST:BEEP:STATe ON\n".to_string()
+                                        } else {
+                                            "SYST:BEEP:STATe OFF\n".to_string()
+                                        };
+                                        let value_debug = self.value_debug;
+                                        tokio::spawn(async move {
+                                            if let Err(e) = tx.send(cmd).await {
+                                                if value_debug {
+                                                    println!("Failed to queue beeper command: {}", e);
+                                                }
+                                            }
+                                        });
+                                    }
                                 }
                             }
 
                             if self.metermode == MeterMode::Cont {
-                                let threshold_slider = ui.add(
+                                let threshold_slider = ui.add_enabled(
+                                    supports_threshold,
                                     egui::Slider::new(&mut self.cont_threshold, 0..=1000)
                                         .text("Threshold (Ω)")
                                         .step_by(1.0)
                                         .clamping(SliderClamping::Always),
                                 );
-                                if threshold_slider.drag_stopped() || threshold_slider.lost_focus()
+                                if supports_threshold && (threshold_slider.drag_stopped() || threshold_slider.lost_focus())
                                 {
                                     if let Some(tx) = self.serial_tx.clone() {
                                         let cmd =
@@ -662,13 +835,14 @@ impl super::MyApp {
                                     }
                                 }
                             } else if self.metermode == MeterMode::Diod {
-                                let threshold_slider = ui.add(
+                                let threshold_slider = ui.add_enabled(
+                                    supports_threshold,
                                     egui::Slider::new(&mut self.diod_threshold, 0.0..=3.0)
                                         .text("Threshold (V)")
                                         .step_by(0.1)
                                         .clamping(SliderClamping::Always),
                                 );
-                                if threshold_slider.drag_stopped() || threshold_slider.lost_focus()
+                                if supports_threshold && (threshold_slider.drag_stopped() || threshold_slider.lost_focus())
                                 {
                                     if let Some(tx) = self.serial_tx.clone() {
                                         let cmd =

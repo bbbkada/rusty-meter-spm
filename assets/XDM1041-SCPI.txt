@@ -1,0 +1,301 @@
+OWON XDM1041 SCPI commands  TheHWcave
+Comms parameters (default, can be changed using Utility menu):
+Speed: 115200, 8 bits, 1 stop, no parity 
+Applies to firmware V1.2.0  and firmware dated 20210525
+Table of Contents
+(common).............................................................................................................................................1
+*IDN?...............................................................................................................................................1
+SYSTem................................................................................................................................................1
+MEASure..............................................................................................................................................2
+CONFigure...........................................................................................................................................2
+CONF:VOLT...................................................................................................................................2
+CONF:CURR...................................................................................................................................3
+CONF:RES AUTO..........................................................................................................................4
+CONF:CAP AUTO..........................................................................................................................4
+CONF:FREQ...................................................................................................................................5
+CONF:PER......................................................................................................................................5
+CONF:DIOD....................................................................................................................................5
+CONF:CONT...................................................................................................................................5
+CONF:TEMP:RTD type..................................................................................................................5
+TEMP...................................................................................................................................................5
+CONT...................................................................................................................................................6
+CALC...................................................................................................................................................6
+FUNC...................................................................................................................................................7
+(other)...................................................................................................................................................8
+BEEP:STAT?....................................................................................................................................8
+AUTO..............................................................................................................................................8
+RATE chr.........................................................................................................................................8
+RANGE #.........................................................................................................................................9
+(common) *IDN? Return the ID character string: 
+OWON <model>,<serialnum>,<version> e.g:
+OWON,XDM1041,12345678,V1.2.0,3 
+ 
+*RST (does not work)
+SYSTem SYST:REM Switches to remote control: Locks the front buttons 
+except for soft key “Local”
+Page 1 of 9 Rev 1 21/06/21
+OWON XDM1041 SCPI commands  TheHWcave
+SYST:LOC Switches to local control: Unlocks the font buttons but 
+all remote control commands still work, even in local 
+mode
+MEASure MEAS?
+MEAS1?
+Returns the current measured value in unformatted 
+floating point format. No unit. If averaging is on, it 
+returns the average
+MEAS2? Returns the 2nd function (FREQ in AC mode) in 
+unformatted floating point format. No unit. Returns 
+“NONe” if no 2nd function is active
+MEAS:SHOW?
+MEAS1:SHOW?
+MEAS2:SHOW?
+Shows the same value as MEAS[1|2] alone but 
+formatted as displayed and with unit. Beware some unit 
+symbols are not UTF-8 compatible, eg 
+Code meaning
+0xa6 0xb8 Ω (Ohm)
+0xaa 0xcc  μ  (micro)
+0xa1 0xe6 ºC 
+0xa8 0x48 ºF
+CONFigure
+CONF:VOLT Same as CONF:VOLT:DC DEF
+CONF:VOLT:DC AUTO Switches to DC volts and V auto range
+CONF:VOLT:DC rng Switches to DC volts and manual range, rng must be 
+specified as below:
+# rng meaning notes
+1 50E-3 MIN 50mV mV auto range2 500E-3 500mV
+3 5 DEF 5V
+V auto range 4 50 50V
+5 500 500V
+6 1000 MAX 1000V
+Quirk: AUTO can switch from mV to V range but not 
+back
+CONF:VOLT:AC AUTO Switches to AC volts and V auto range
+Page 2 of 9 Rev 1 21/06/21
+OWON XDM1041 SCPI commands  TheHWcave
+CONF:VOLT:AC rng Switches to AC volts and manual range,  rng must be 
+specified as below:
+# rng meaning notes
+1 500E-3 MIN 500mV mV auto range
+2 5 DEF 5V
+V auto range 3 50 50V
+4 500 500V
+5 750 MAX 750V
+Quirk: AUTO can switch from mV to V range but not 
+back
+CONF:CURR Same as CONF:CURR:DC DEF
+CONF:CURR:DC AUTO witches to DC current and A auto range
+CONF:CURR:DC rng Switches to DC current and manual range,  rng must be 
+specified as below:
+# rng meaning notes
+1 500E-6 MIN 500uA
+mA / A auto 
+range
+2 5E-3 5mA
+3 50E-3 50mA
+4 500E-3 500mA
+5 5 DEF 5A A auto range6 10 MAX 10A
+Quick1: because mA and A have different sockets, 
+AUTO range for mA also works for A as long as the mA
+socket is used. 
+Danger: if 10A socket is used and function is 
+set to mA it reads 0 although current is flowing
+CONF:CURR:AC AUTO Switches to AC current and A auto range
+Page 3 of 9 Rev 1 21/06/21
+OWON XDM1041 SCPI commands  TheHWcave
+CONF:CURR AC rng Switches to AC current and manual range,  rng must be 
+specified as below:
+# rng meaning notes
+1 500E-6 MIN 500uA
+mA auto range2 5E-3 5mA
+3 50E-3 50mA
+4 500E-3 500mA
+5 5  DEF 5A A auto range6 10 MAX 10A
+Quick1: because mA and A have different sockets, 
+AUTO range for mA also works for A as long as the mA
+socket is used. 
+Danger: if 10A socket is used and function is 
+set to mA it reads 0 although current is flowing
+CONF:RES AUTO Switches to resistance mode and enables AUTO range
+CONF:RES rng Switches to resistance mode and manual range, rng 
+must be specified as below:
+# rng meaning
+1 500 MIN | DEF 500Ω
+2 5E3 5KΩ
+3 50E3 50KΩ
+4 500E3 500KΩ
+5 5E6 5MΩ
+6 50E6 MAX 50MΩ
+CONF:CAP AUTO switches to capacitance mode and enables AUTO range
+Page 4 of 9 Rev 1 21/06/21
+OWON XDM1041 SCPI commands  TheHWcave
+CONF:CAP rng Switches to capacitance mode and manual range, rng 
+must be specified as below:
+# rng meaning
+1 50E-9 MIN | DEF 50nF
+2 500E-9 500nF
+3 5E-6 5uF
+4 50E-6 50uF
+5 500E-6 500uF
+6 5E-3 5mF
+7 50E-3 MAX 50mF
+CONF:FREQ Switches to frequency
+CONF:PER Switches to period
+CONF:DIOD Switches to diode mode
+CONF:CONT Switches to continuity mode
+CONF:TEMP:RTD type Switches to temperature mode, sensor type must be 
+specified as below:
+# type meaning
+1 KITS90 MIN | DEF K-type
+2 PT100 MAX PT100
+Quirk:  in TEMP mode with KITS90 selected, the 
+XDM1041 will update its internal cold junction 
+temperature reference every 600 seconds (10 minutes). 
+During that update, it does not respond to SCPI 
+commands for about 3 seconds but will queue the 
+responses which are then made available once the 
+update is complete.  
+TEMP
+TEMP:RTD:UNIT unit Switches temperature unit, unit must be specified as 
+below:
+C    = Celsius
+F    = Fahrenheit
+K   = Kelvin
+Page 5 of 9 Rev 1 21/06/21
+OWON XDM1041 SCPI commands  TheHWcave
+TEMP:RTD:SHOW type Selects what is displayed in temperature mode, type 
+must be specified as below:
+type meaning
+TEMP temperature value only
+MEAS measurement value only, e.g. resistance of 
+PT100 or K-type voltage
+ALL Both TEMP and MEAS are displayed
+Note: MEAS? or MEAS1? always return the 
+temperature value, whatever is specified for type, 
+however, MEAS:SHOW? returns either the temperature 
+or the measurement depending on type. MEAS2? 
+always returns NONe
+Bug:  on SCPI if MEAS is selected. The temperature 
+value returned by MEAS? or MEAS1? Is no longer 
+updated. 
+CONT
+CONT:THRE val Specifies the resistance below which the continuity 
+beeper will beep. Sensible values for val are integer 
+values between 0 and 1000 
+CALC CALC:FUNC func Selects the maths function, func needs to be as specified
+below:
+Func meaning
+NULL
+(=Rel)
+Rel mode. The current value is taken as 
+reference and subtracted from all measured
+values. 
+DB Convert to dB based on selected reference
+DBM Convert to dbM based on selected 
+reverence
+AVER Calculate max, min and average
+Quirk1: using any maths option turns the others off for 
+that for that measurement function, i.e. only one can be 
+active.  In case of REL, the offset is lost when another 
+math function is selected. 
+Quirk2: To use AVER with REL, select REL first, then 
+select some other measurement function, turn AVER on 
+and then go back to the original measurement. 
+CALC:FUNC? Returns the selected CALC function (NULL, DB, 
+DBM, AVER) if and only if it is active. Times out if no 
+CALC function is active. 
+CALC:STAT OFF Turns math function off (including rel  = NULL mode)
+Page 6 of 9 Rev 1 21/06/21
+OWON XDM1041 SCPI commands  TheHWcave
+CALC:DB:REF? Returns the selected reference resistance for dB
+CALC:DB:REF val Sets the reference resistance for dB. It must be one of 
+the values below:
+50, 75, 93, 110, 124, 125, 135, 150, 250, 300, 500, 600, 
+800, 900, 1000, 1200, 8000
+Note: using MIN, DEF, MAX does not work. The 
+power-on default is 50
+CALC:DBM:REF? [not working]?
+CALC:DBM:REF val [not working]? 
+CALC:AVER:AVER?  Returns average
+CALC:AVER:MIN? Returns minimum
+CALC:AVER:MAX? Returns maximum
+CALC:NULL:OFFS? Supposed to return the offset used by REL function but 
+the value returned makes little sense (to me). Needs 
+more investigation. 
+FUNC
+FUNC?
+FUNC1?
+Returns the current function on the main display. One of
+the following:
+Return  meaning
+VOLT AC AC volts
+VOLT DC volts
+CURR AC AC amps
+CURR DC amps
+FREQ Frequency
+PER Period
+CAP Capacitance
+CONT Continuity
+DIOD Diode
+RES Resistance
+TEMP Temperature
+ 
+Page 7 of 9 Rev 1 21/06/21
+OWON XDM1041 SCPI commands  TheHWcave
+FUNC2? Returns the current function of the secondary display. 
+One of:
+Return meaning
+NONe No secondary function active
+FREQ Frequency  (works only Volt AC or 
+CURR AC) 
+FUNC2 “FREQ” Sets the secondary function to frequency
+Bug:  on SCPI the FREQ value is erroneously scaled 
+with the range of the primary measurement
+Primary Range Scale 50 Hz returned as
+500mV 1000 0.05
+5V and above 1 50
+Primary Range Scale 50 Hz returned as
+500uA 1000,000 0.000050
+5mA 1000 0.05
+50mA 1000 0.05
+500mA 1000 0.05
+5A and above 1 50
+FUNC2 “NONe” Turns secondary function off
+(other)
+BEEP:STAT? Returns the status of the beeper, NO [sic] for on and  
+OFF for off.
+BEEP:STAT ON Turns beeper on
+BEEP:STAT OFF Turns beeper off
+AUTO Turns auto range on
+AUTO? Returns 0 if auto range is off or 1 if auto range is on
+RATE chr Sets the measuring speed: chr must be:
+S  = slow
+M = medium
+F  = fast
+RATE? Returns a character indicating the measring speed (rate):
+S  = slow
+M = medium
+F  = fast
+Page 8 of 9 Rev 1 21/06/21
+OWON XDM1041 SCPI commands  TheHWcave
+RANGE # The # is the number shown in the column # in the range 
+tables. For example in resistance mode, RATE 2 selects 
+5KΩ
+Quirk: it changes range regardless of function, so in 
+VOLT: Function: V, the command RANGE MIN 
+changes range to manual 50mV, however if then 
+command AUTO is send it changes back to 5V AUTO 
+(because that is the default AUTO range for function V) 
+To switch to 50mV AUTO use this sequence:
+CONF:VOLT:DC 50E-3
+AUTO
+RANGE? Returns the current range setting formatted as shown on 
+the display. 
+The XDM1041 does not respond to this command in 
+DIOD and CONT mode 
+Quirk1: Beware that some unit symbols are not UTF-8 
+compatible, eg “Ω”  is represented as 2 bytes: 0xa6 
+0xb8, and μ of μF is shown as 0xaa 0xcc but uA works 
+because it uses u instead of μ
+Quirk2: For temperature it returns the sensor type. 
+e.g. KITS90

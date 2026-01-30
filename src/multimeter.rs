@@ -1,4 +1,86 @@
 use phf::{OrderedMap, phf_ordered_map};
+use crate::device_plugin::{DevicePlugin, Xdm1041Plugin, Spm6103Plugin};
+
+/// Device types supported by the application
+#[derive(PartialEq, Clone, Copy, Debug)]
+pub enum DeviceType {
+    /// OWON XDM1041/XDM1241 Benchtop Multimeter
+    OwonXdm1041,
+    /// OWON SPM6103 Power Supply with integrated Multimeter
+    OwonSpm6103,
+    /// Unknown/unsupported device (fallback to XDM1041 commands)
+    Unknown,
+}
+
+impl DeviceType {
+    /// Detect device type from *IDN? response
+    /// Example responses:
+    /// - "OWON,XDM1041,12345678,V1.2.3"
+    /// - "OWON,SPM6103,25281747,FV:V2.1.0"
+    /// Supports wildcard matching: XDM* defaults to XDM1041, SPM* defaults to SPM6103
+    pub fn from_idn(idn: &str) -> Self {
+        let parts: Vec<&str> = idn.split(',').collect();
+        if parts.len() >= 2 && parts[0] == "OWON" {
+            let model = parts[1];
+            match model {
+                "XDM1041" | "XDM1241" => DeviceType::OwonXdm1041,
+                "SPM6103" => DeviceType::OwonSpm6103,
+                _ => {
+                    // Wildcard matching
+                    if model.starts_with("XDM") {
+                        DeviceType::OwonXdm1041
+                    } else if model.starts_with("SPM") {
+                        DeviceType::OwonSpm6103
+                    } else {
+                        DeviceType::Unknown
+                    }
+                }
+            }
+        } else {
+            DeviceType::Unknown
+        }
+    }
+
+    /// Get the plugin implementation for this device type
+    pub fn plugin(&self) -> Box<dyn DevicePlugin> {
+        match self {
+            DeviceType::OwonXdm1041 | DeviceType::Unknown => Box::new(Xdm1041Plugin),
+            DeviceType::OwonSpm6103 => Box::new(Spm6103Plugin),
+        }
+    }
+
+    /// Get the measurement query command for this device
+    pub fn meas_cmd(&self) -> &'static str {
+        match self {
+            DeviceType::OwonXdm1041 | DeviceType::Unknown => "MEAS?\n",
+            DeviceType::OwonSpm6103 => "CONFigure:ALL?\n",
+        }
+    }
+
+    /// Get the function query command for this device
+    pub fn func_cmd(&self) -> &'static str {
+        match self {
+            DeviceType::OwonXdm1041 | DeviceType::Unknown => "FUNC?\n",
+            DeviceType::OwonSpm6103 => "FUNC?\n",
+        }
+    }
+
+    /// Get the command to set a specific meter mode
+    /// Returns the appropriate command string for the device type
+    pub fn mode_cmd(&self, mode: MeterMode) -> String {
+        self.plugin().mode_command(mode)
+    }
+    
+    /// Check if this device supports a specific mode
+    pub fn supports_mode(&self, mode: MeterMode) -> bool {
+        self.plugin().supports_mode(mode)
+    }
+    
+    /// Check if this device supports sampling rate control
+    pub fn supports_rate_control(&self) -> bool {
+        self.plugin().supports_rate_control()
+    }
+}
 
 /// A trait that must be implemented for all SCPI command structs.
 /// Gets passed the struct instance itself and the selected option name
@@ -14,7 +96,7 @@ pub enum ScpiMode {
     Meas,
 }
 
-#[derive(PartialEq, Clone, Copy, Debug)]
+#[derive(PartialEq, Eq, Hash, Clone, Copy, Debug)]
 pub enum MeterMode {
     Vdc,
     Vac,
@@ -62,143 +144,5 @@ impl RateCmd {
 
     pub fn len(&self) -> usize {
         self.opts.len()
-    }
-}
-
-pub struct RangeCmd {
-    scpi: &'static str,
-    pub opts: OrderedMap<&'static str, &'static str>,
-}
-
-impl Default for RangeCmd {
-    // this corresponds to OWON XDM1041 VDC ranges
-    fn default() -> Self {
-        Self {
-            scpi: "CONF:VOLT:DC ",
-            opts: phf_ordered_map! {
-                "auto" => "AUTO",
-                "50mV" => "50E-3",
-                "500mV" => "500E-3",
-                "5V" => "5",
-                "50V" => "50",
-                "500V" => "500",
-                "1000V" => "1000",
-            },
-        }
-    }
-}
-
-impl GenScpi for RangeCmd {
-    fn gen_scpi(&self, opt_name: &str) -> String {
-        format!("{}{}\n", self.scpi, self.opts[opt_name])
-    }
-}
-
-impl RangeCmd {
-    pub fn new(meter: &str, mode: &str) -> Option<Self> {
-        match (meter, mode) {
-            ("OWON XDM1041", "VDC") => Some(Self::default()),
-            ("OWON XDM1041", "VAC") => Some(Self::owon_xdm1041_vac()),
-            ("OWON XDM1041", "ADC") => Some(Self::owon_xdm1041_adc()),
-            ("OWON XDM1041", "AAC") => Some(Self::owon_xdm1041_aac()),
-            ("OWON XDM1041", "RES") => Some(Self::owon_xdm1041_res()),
-            ("OWON XDM1041", "CAP") => Some(Self::owon_xdm1041_cap()),
-            ("OWON XDM1041", "TEMP") => Some(Self::owon_xdm1041_temp()),
-            _ => None,
-        }
-    }
-
-    pub fn get_opt(&self, index: usize) -> (&'static str, &'static str) {
-        let (key, value) = self.opts.index(index).unwrap();
-        (*key, *value)
-    }
-
-    pub fn len(&self) -> usize {
-        self.opts.len()
-    }
-
-    fn owon_xdm1041_vac() -> Self {
-        Self {
-            scpi: "CONF:VOLT:AC ",
-            opts: phf_ordered_map! {
-                "auto" => "AUTO",
-                "500mV" => "500E-3",
-                "5V" => "5",
-                "50V" => "50",
-                "500V" => "500",
-                "750V" => "750",
-            },
-        }
-    }
-
-    fn owon_xdm1041_adc() -> Self {
-        Self {
-            scpi: "CONF:CURR:DC ",
-            opts: phf_ordered_map! {
-                "auto" => "AUTO",
-                "500uA" => "500E-6",
-                "5mA" => "5E-3",
-                "50mA" => "50E-3",
-                "500mA" => "500E-3",
-                "5A" => "5",
-                "10A" => "10",
-            },
-        }
-    }
-
-    fn owon_xdm1041_aac() -> Self {
-        Self {
-            scpi: "CONF:CURR:AC ",
-            opts: phf_ordered_map! {
-                "auto" => "AUTO",
-                "500uA" => "500E-6",
-                "5mA" => "5E-3",
-                "50mA" => "50E-3",
-                "500mA" => "500E-3",
-                "5A" => "5",
-                "10A" => "10",
-            },
-        }
-    }
-
-    fn owon_xdm1041_res() -> Self {
-        Self {
-            scpi: "CONF:RES ",
-            opts: phf_ordered_map! {
-                "auto" => "AUTO",
-                "500Ohm" => "500",
-                "5kOhm" => "5E3",
-                "50kOhm" => "50E3",
-                "500kOhm" => "500E3",
-                "5MOhm" => "5E6",
-                "50MOhm" => "50E6",
-            },
-        }
-    }
-
-    fn owon_xdm1041_cap() -> Self {
-        Self {
-            scpi: "CONF:CAP ",
-            opts: phf_ordered_map! {
-                "auto" => "AUTO",
-                "50nF" => "50E-9",
-                "500nF" => "500E-9",
-                "5uF" => "5E-6",
-                "50uF" => "50E-6",
-                "500uF" => "500E-6",
-                "5mF" => "5E-3",
-                "50mF" => "50E-3",
-            },
-        }
-    }
-
-    fn owon_xdm1041_temp() -> Self {
-        Self {
-            scpi: "CONF:TEMP:RTD ",
-            opts: phf_ordered_map! {
-                "PT100" => "PT100",
-                "K-type (KITS90)" => "KITS90",
-            },
-        }
     }
 }

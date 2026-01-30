@@ -10,11 +10,12 @@ egui = "0.33.3"
 eframe = { version = "0.33.3", default-features = false, features = [
     "accesskit",     # Make egui comptaible with screen readers. NOTE: adds a lot of dependencies.
     "default_fonts", # Embed the default egui fonts.
-    "glow",          # Use the glow rendering backend. Alternative: "wgpu".
+    "wgpu",          # Use the wgpu rendering backend (better RDP support than glow/OpenGL).
     "persistence",   # Enable restoring app state when restarting the app.
     "x11",           # for Linux
     "wayland",       # for Linux  
 ] }
+wgpu = { version = "27.0.1", features = ["dx12", "metal", "vulkan", "webgpu"] } # DirectX 12 (Windows), Metal (macOS), Vulkan (cross-platform), WebGPU (web)
 egui-dropdown = "0.14.0"
 egui_dock = "0.18.0"
 image = { version = "0.25.9", features = ["jpeg", "png"] }

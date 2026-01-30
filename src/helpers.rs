@@ -18,7 +18,12 @@ pub fn format_measurement(
             MeterMode::Diod | MeterMode::Cont | MeterMode::Res
         )
     {
-        return ("OVERLOAD".to_string(), "".to_string());
+        // Show "Open" for diode mode, "OL" for resistance and continuity modes
+        return if matches!(meter_mode, MeterMode::Diod) {
+            ("    Open".to_string(), "".to_string())
+        } else {
+            ("      OL".to_string(), "".to_string())
+        };
     }
 
     let abs_value = value.abs();
