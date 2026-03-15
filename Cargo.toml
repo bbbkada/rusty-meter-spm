@@ -1,6 +1,6 @@
 [package]
 name = "rusty_meter"
-version = "0.4.2"
+version = "0.4.1"
 authors = ["Markus Krause <Krause.Markus@gmx.com>"]
 edition = "2024"
 rust-version = "1.91"  # when updating here, also update release.yml and rust-toolchain file

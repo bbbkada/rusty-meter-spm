@@ -323,10 +323,7 @@ impl super::MyApp {
                 powered_by(ui);
                 ui.hyperlink_to(
                     format!("Version: v{}", super::VERSION),
-                    format!(
-                        "https://github.com/markusdd/rusty_meter/releases/tag/v{}",
-                        super::VERSION
-                    ),
+                    "https://github.com/bbbkada/rusty-meter-spm/releases/latest",
                 );
                 egui::warn_if_debug_build(ui);
             });
