@@ -13,6 +13,7 @@ use mio_serial::{SerialPortInfo, SerialStream};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::multimeter::{DeviceType, MeterMode, RateCmd, ScpiMode};
+use crate::device_plugin::PowerSupplyState;
 
 // Submodules for split impl blocks
 mod graph;
@@ -110,6 +111,8 @@ pub struct MyApp {
     #[serde(skip)]
     curr_meas: f64,
     #[serde(skip)]
+    curr_decimals: usize,  // Number of decimal places from instrument
+    #[serde(skip)]
     curr_unit: String,
     #[serde(skip)]
     issue_new_write: bool,
@@ -146,7 +149,7 @@ pub struct MyApp {
     #[serde(skip)]
     pending_mode_change: Option<MeterMode>, // Track mode being changed to, ignore range updates during transition
     #[serde(skip)]
-    serial_rx: Option<mpsc::Receiver<Option<f64>>>, // handle measurements
+    serial_rx: Option<mpsc::Receiver<Option<(f64, usize)>>>, // handle measurements (value, decimals)
     #[serde(skip)]
     serial_tx: Option<mpsc::Sender<String>>, // channel for sending commands to serial task
     #[serde(skip)]
@@ -178,6 +181,39 @@ pub struct MyApp {
     graph_config: graph::GraphConfig, // Graph configuration
     #[serde(skip)]
     plot_dock_state: DockState<ui::PlotTab>, // Dock state for plot tabs
+    // Power supply state (SPM6103)
+    #[serde(skip)]
+    ps_output_on: bool,
+    #[serde(skip)]
+    ps_output_debounce_until: Option<std::time::Instant>,  // Ignore output_on from device until this time
+    #[serde(skip)]
+    ps_settings_debounce: u32,  // Skip set-value updates from device for N full polls after user interaction
+    ps_voltage_set: f64,      // Persistent: user's desired voltage
+    ps_current_set: f64,      // Persistent: user's desired current
+    ps_ovp: f64,              // Persistent: overvoltage protection
+    ps_ocp: f64,              // Persistent: overcurrent protection
+    #[serde(skip)]
+    ps_voltage_readback: f64, // Live readback from device
+    #[serde(skip)]
+    ps_current_readback: f64, // Live readback from device
+    #[serde(skip)]
+    ps_power_readback: f64,   // Live power readback from device
+    #[serde(skip)]
+    ps_rx: Option<mpsc::Receiver<PowerSupplyState>>, // Channel for PS state updates
+    #[serde(skip)]
+    ps_initial_sync_done: bool, // Whether initial PS state sync has been done
+    #[serde(skip)]
+    ps_voltage_input: String,  // Text input buffer for voltage
+    #[serde(skip)]
+    ps_current_input: String,  // Text input buffer for current
+    #[serde(skip)]
+    ps_ovp_input: String,      // Text input buffer for OVP
+    #[serde(skip)]
+    ps_ocp_input: String,      // Text input buffer for OCP
+    #[serde(skip)]
+    ps_input_editing: bool,    // True when any PS text input has focus (set during rendering, checked next frame)
+    #[serde(skip)]
+    ps_confirmed_non_spm: bool, // Set to true when connected device is confirmed as non-SPM
 }
 
 // Enum to track connection state
@@ -209,6 +245,7 @@ impl Default for MyApp {
             scpimode: ScpiMode::Idn,
             confstring: "".to_owned(),
             curr_meas: f64::NAN,
+            curr_decimals: 4,
             curr_unit: "VDC".to_owned(),
             issue_new_write: false,
             readbuf: [0u8; 1024],
@@ -267,6 +304,25 @@ impl Default for MyApp {
             last_record_time: 0.0, // Initialize last recording time
             graph_config: graph::GraphConfig::default(), // Default graph config
             plot_dock_state: DockState::new(vec![]), // Initialize empty, populated in update
+            // Power supply defaults
+            ps_output_on: false,
+            ps_output_debounce_until: None,
+            ps_settings_debounce: 0,
+            ps_voltage_set: 5.0,
+            ps_current_set: 1.0,
+            ps_ovp: 32.0,
+            ps_ocp: 3.2,
+            ps_voltage_readback: 0.0,
+            ps_current_readback: 0.0,
+            ps_power_readback: 0.0,
+            ps_rx: None,
+            ps_initial_sync_done: false,
+            ps_voltage_input: "5.000".to_string(),
+            ps_current_input: "1.000".to_string(),
+            ps_ovp_input: "32.000".to_string(),
+            ps_ocp_input: "3.200".to_string(),
+            ps_input_editing: false,
+            ps_confirmed_non_spm: false,
         }
     }
 }
@@ -436,6 +492,7 @@ impl MyApp {
         self.serial_tx = None; // Drop sender to stop sending commands
         self.serial_rx = None; // Drop receiver to stop receiving measurements
         self.mode_rx = None; // Drop mode receiver
+        self.ps_rx = None; // Drop PS receiver
         self.serial = None; // Clear serial port
         self.connection_state = ConnectionState::Disconnected;
         self.connection_error = None; // Clear any previous error
@@ -445,5 +502,11 @@ impl MyApp {
         self.values.clear(); // Clear graph data
         self.hist_values.clear(); // Clear histogram data
         self.meas_count = 0; // Reset measurement counter
+        self.ps_output_on = false; // Reset PS state
+        self.ps_voltage_readback = 0.0; // Reset readback
+        self.ps_current_readback = 0.0;
+        self.ps_power_readback = 0.0;
+        self.ps_initial_sync_done = false; // Reset PS sync flag
+        self.ps_confirmed_non_spm = false; // Reset PS visibility flag
     }
 }

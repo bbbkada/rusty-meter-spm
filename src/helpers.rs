@@ -6,6 +6,7 @@ pub fn format_measurement(
     sci_threshold_high: f64,
     sci_threshold_low: f64,
     meter_mode: &MeterMode,
+    raw_decimals: Option<usize>,
 ) -> (String, String) {
     if value.is_nan() {
         return ("    NaN".to_string(), "".to_string());
@@ -46,15 +47,7 @@ pub fn format_measurement(
     // Adjust value and unit based on mode and magnitude
     match meter_mode {
         MeterMode::Vdc | MeterMode::Vac => {
-            if abs_value < 1.0 {
-                display_value = value * 1000.0;
-                display_unit = if matches!(meter_mode, MeterMode::Vdc) {
-                    "mVDC"
-                } else {
-                    "mVAC"
-                }
-                .to_string();
-            }
+            // Values < 1V stay as V (e.g. 0.0121 V) — no mV scaling
         }
         MeterMode::Adc | MeterMode::Aac => {
             if abs_value < 1.0 {
@@ -74,10 +67,8 @@ pub fn format_measurement(
             } else if abs_value >= 1_000.0 {
                 display_value = value / 1_000.0;
                 display_unit = "kOhm".to_string();
-            } else if abs_value < 1.0 && abs_value > 0.0 {
-                display_value = value * 1000.0;
-                display_unit = "mOhm".to_string();
             }
+            // Values < 1 Ohm stay as Ohm (e.g. 0.330 Ohm) — no mOhm scaling
         }
         MeterMode::Cap => {
             if abs_value >= 0.001 {
@@ -107,6 +98,9 @@ pub fn format_measurement(
         || (abs_display_value < sci_threshold_low && abs_display_value > 0.0)
     {
         format!("{:>width$.3e}", display_value, width = max_digits)
+    } else if let Some(decimals) = raw_decimals {
+        // Use exact decimal count from instrument
+        format!("{:>width$.*}", decimals, display_value, width = max_digits)
     } else {
         let precision = if abs_display_value >= 1000.0 {
             2

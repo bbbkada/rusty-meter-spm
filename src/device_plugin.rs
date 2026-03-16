@@ -1,11 +1,24 @@
 use crate::multimeter::MeterMode;
 
+/// Count the number of decimal places in a numeric string
+fn count_decimals(s: &str) -> usize {
+    // Strip leading sign
+    let s = s.trim_start_matches(|c: char| c == '+' || c == '-');
+    if let Some(dot_pos) = s.find('.') {
+        // Count digits after the dot (stop at non-digit)
+        s[dot_pos + 1..].chars().take_while(|c| c.is_ascii_digit()).count()
+    } else {
+        0
+    }
+}
+
 /// Result of parsing a device response
 #[derive(Debug)]
 pub struct ParseResult {
     pub measurement: Option<f64>,
     pub mode: Option<MeterMode>,
     pub range_index: Option<usize>, // Index into RangeInfo.ranges for the current mode
+    pub decimals: Option<usize>,    // Number of decimal places in the raw measurement string
 }
 
 /// Range information for a specific mode
@@ -13,6 +26,31 @@ pub struct ParseResult {
 pub struct RangeInfo {
     pub scpi_prefix: &'static str,
     pub ranges: Vec<(&'static str, &'static str)>, // (display_name, scpi_value)
+}
+
+/// Power supply limits for a device with integrated PSU
+#[derive(Clone, Debug)]
+pub struct PowerSupplyLimits {
+    pub voltage_min: f64,
+    pub voltage_max: f64,
+    pub current_min: f64,
+    pub current_max: f64,
+    pub ovp_max: f64,
+    pub ocp_max: f64,
+}
+
+/// Power supply readback state received from device
+#[derive(Clone, Debug, Default)]
+pub struct PowerSupplyState {
+    pub output_on: bool,
+    pub voltage_set: f64,
+    pub current_set: f64,
+    pub ovp: f64,
+    pub ocp: f64,
+    pub voltage_readback: f64, // Actual measured output voltage (MEAS:VOLT?)
+    pub current_readback: f64, // Actual measured output current (MEAS:CURR?)
+    pub power_readback: f64,   // Actual measured output power (MEAS:POW?)
+    pub includes_settings: bool, // True only for full polls that queried VOLT?/CURR?/etc.
 }
 
 /// Trait for device-specific behavior
@@ -49,6 +87,12 @@ pub trait DevicePlugin: Send + Sync {
     /// Parse range query response and return the matching range index
     /// Returns None if response cannot be parsed or doesn't match any known range
     fn parse_range_response(&self, response: &str, mode: MeterMode) -> Option<usize>;
+    
+    /// Check if this device has an integrated power supply
+    fn supports_power_supply(&self) -> bool;
+    
+    /// Get power supply limits (voltage/current min/max, OVP/OCP max)
+    fn power_supply_limits(&self) -> Option<PowerSupplyLimits>;
 }
 
 /// Plugin for OWON XDM1041/XDM1241 multimeters
@@ -89,20 +133,21 @@ impl DevicePlugin for Xdm1041Plugin {
                     } else if unquoted == "CURR AC" {
                         MeterMode::Aac
                     } else {
-                        return ParseResult { measurement: None, mode: None, range_index: None };
+                        return ParseResult { measurement: None, mode: None, range_index: None, decimals: None };
                     }
                 }
             };
             
-            return ParseResult { measurement: None, mode: Some(mode), range_index: None };
+            return ParseResult { measurement: None, mode: Some(mode), range_index: None, decimals: None };
         }
         
         // Try parsing direct measurement value (format: "+1.234")
         if let Ok(meas) = trimmed.parse::<f64>() {
-            return ParseResult { measurement: Some(meas), mode: None, range_index: None };
+            let decimals = count_decimals(trimmed);
+            return ParseResult { measurement: Some(meas), mode: None, range_index: None, decimals: Some(decimals) };
         }
         
-        ParseResult { measurement: None, mode: None, range_index: None }
+        ParseResult { measurement: None, mode: None, range_index: None, decimals: None }
     }
     
     fn mode_command(&self, mode: MeterMode) -> String {
@@ -297,6 +342,14 @@ impl DevicePlugin for Xdm1041Plugin {
         
         None
     }
+    
+    fn supports_power_supply(&self) -> bool {
+        false
+    }
+    
+    fn power_supply_limits(&self) -> Option<PowerSupplyLimits> {
+        None
+    }
 }
 
 /// Plugin for OWON SPM6103 power supply with integrated multimeter
@@ -308,7 +361,7 @@ impl DevicePlugin for Spm6103Plugin {
         
         // SPM6103 uses comma-separated format
         if !trimmed.contains(',') {
-            return ParseResult { measurement: None, mode: None, range_index: None };
+            return ParseResult { measurement: None, mode: None, range_index: None, decimals: None };
         }
         
         // CONFigure:ALL? format: "VOLT:DC,+0.0011V,AUTO,2V"
@@ -317,7 +370,7 @@ impl DevicePlugin for Spm6103Plugin {
         // Format is "TYPE,VALUE,STATUS,RANGE"
         let parts: Vec<&str> = trimmed.split(',').collect();
         if parts.len() < 2 {
-            return ParseResult { measurement: None, mode: None, range_index: None };
+            return ParseResult { measurement: None, mode: None, range_index: None, decimals: None };
         }
         
         // Detect mode from the TYPE field
@@ -350,6 +403,12 @@ impl DevicePlugin for Spm6103Plugin {
             numeric_part.parse::<f64>().ok()
         };
         
+        // Count decimals from raw value string
+        let decimals = {
+            let numeric_part = value_str.trim_end_matches(|c: char| c.is_alphabetic());
+            Some(count_decimals(numeric_part))
+        };
+        
         // Extract range - check STATUS field (3rd) first for AUTO/Manual
         let range_index = if parts.len() >= 3 && detected_mode.is_some() {
             let status = parts[2].trim();
@@ -378,7 +437,7 @@ impl DevicePlugin for Spm6103Plugin {
             None
         };
         
-        ParseResult { measurement, mode: detected_mode, range_index }
+        ParseResult { measurement, mode: detected_mode, range_index, decimals }
     }
     
     fn mode_command(&self, mode: MeterMode) -> String {
@@ -581,5 +640,20 @@ impl DevicePlugin for Spm6103Plugin {
         }
         
         None
+    }
+    
+    fn supports_power_supply(&self) -> bool {
+        true
+    }
+    
+    fn power_supply_limits(&self) -> Option<PowerSupplyLimits> {
+        Some(PowerSupplyLimits {
+            voltage_min: 0.0,
+            voltage_max: 60.0,   // SPM6103: 0-60V
+            current_min: 0.0,
+            current_max: 3.2,    // SPM6103: 0-3.2A (approximation, depends on model)
+            ovp_max: 63.0,
+            ocp_max: 3.5,
+        })
     }
 }

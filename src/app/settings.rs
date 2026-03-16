@@ -4,11 +4,24 @@ impl super::MyApp {
     pub fn show_settings(&mut self, ctx: &Context) {
         if self.settings_open {
             Window::new("Settings")
-                .auto_sized()
+                .default_size([500.0, 600.0])
+                .resizable(true)
                 .interactable(true)
                 .show(ctx, |ui| {
-                    ui.vertical(|ui| {
+                    // Close button at top-right
+                    ui.horizontal(|ui| {
                         ui.heading("Settings");
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.add(egui::Button::new(
+                                egui::RichText::new("  X  ").strong().size(16.0)
+                            ).fill(egui::Color32::from_rgb(180, 0, 0))).clicked() {
+                                self.settings_open = false;
+                            }
+                        });
+                    });
+                    ui.separator();
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                    ui.vertical(|ui| {
                         ui.checkbox(&mut self.connect_on_startup, "Connect on startup");
                         ui.checkbox(&mut self.lock_remote, "Lock meter in remote mode");
                         ui.checkbox(
@@ -182,10 +195,8 @@ impl super::MyApp {
                                 );
                             });
                         });
-                        if ui.button("Close").clicked() {
-                            self.settings_open = false;
-                        }
                     });
+                    }); // ScrollArea
                 });
         }
     }

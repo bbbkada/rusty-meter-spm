@@ -3,6 +3,7 @@ use egui_dock::{DockArea, DockState, Style, TabViewer};
 use egui_dropdown::DropDownBox;
 use mio_serial::{DataBits, SerialPort, SerialPortBuilderExt};
 use std::collections::VecDeque;
+use std::time::Instant;
 
 use crate::helpers::{format_measurement, powered_by};
 use crate::multimeter::{GenScpi, MeterMode};
@@ -93,14 +94,14 @@ impl super::MyApp {
         if ctx.input(|i| i.key_pressed(egui::Key::Space)) {
             self.hold_enabled = !self.hold_enabled;
             *self.hold_enabled_shared.lock().unwrap() = self.hold_enabled;
-            println!("Hold toggled via spacebar: {}", self.hold_enabled);
+            if self.value_debug { println!("Hold toggled via spacebar: {}", self.hold_enabled); }
             // Reset last_graph_update when resuming to allow immediate update
             if !self.hold_enabled {
                 self.last_graph_update = 0.0;
             }
             // Only send hardware hold command if device supports it
             let supports_hold = self.device_type.lock().unwrap().plugin().supports_hold();
-            println!("Device supports hold: {}", supports_hold);
+            if self.value_debug { println!("Device supports hold: {}", supports_hold); }
             if supports_hold {
                 if let Some(tx) = self.serial_tx.clone() {
                     let cmd = if self.hold_enabled {
@@ -108,14 +109,15 @@ impl super::MyApp {
                     } else {
                         "MULT:HOLD OFF\n".to_string()
                     };
-                    println!("Sending hold command: {:?}", cmd);
+                    if self.value_debug { println!("Sending hold command: {:?}", cmd); }
+                    let value_debug = self.value_debug;
                     tokio::spawn(async move {
                         if let Err(e) = tx.send(cmd).await {
-                            println!("Failed to queue hold command: {}", e);
+                            if value_debug { println!("Failed to queue hold command: {}", e); }
                         }
                     });
                 } else {
-                    println!("serial_tx is None, cannot send hold command");
+                    if self.value_debug { println!("serial_tx is None, cannot send hold command"); }
                 }
             }
         }
@@ -178,11 +180,12 @@ impl super::MyApp {
         // Process all available measurements
         if let Some(ref mut rx) = self.serial_rx {
             while let Ok(meas_opt) = rx.try_recv() {
-                if let Some(meas) = meas_opt {
+                if let Some((meas, decimals)) = meas_opt {
                     if self.value_debug {
-                        println!("UI received measurement: {}", meas);
+                        println!("UI received measurement: {} ({}dp)", meas, decimals);
                     }
-                    self.curr_meas = meas; // Update curr_meas with new data
+                    self.curr_meas = meas;
+                    self.curr_decimals = decimals;
                 }
             }
         }
@@ -277,6 +280,66 @@ impl super::MyApp {
                 }
             }
         }
+        
+        // Handle power supply state updates from serial task
+        if let Some(rx) = &mut self.ps_rx {
+            while let Ok(ps_state) = rx.try_recv() {
+                // Debounce output_on: ignore device state for 500ms after user toggle
+                let debounce_active = self.ps_output_debounce_until
+                    .map_or(false, |until| Instant::now() < until);
+                if debounce_active {
+                    if self.value_debug {
+                        println!("PS debounce: ignoring output_on={} from device (time-based)", ps_state.output_on);
+                    }
+                } else {
+                    self.ps_output_debounce_until = None;
+                    self.ps_output_on = ps_state.output_on;
+                }
+                self.ps_voltage_readback = ps_state.voltage_readback;
+                self.ps_current_readback = ps_state.current_readback;
+                self.ps_power_readback = ps_state.power_readback;
+                // Only update set values from full polls (fast polls carry stale set values)
+                if ps_state.includes_settings {
+                    if self.ps_settings_debounce > 0 {
+                        self.ps_settings_debounce -= 1;
+                        if self.value_debug {
+                            println!("PS settings debounce: skipping set-value update (remaining={})", self.ps_settings_debounce);
+                        }
+                    } else {
+                        self.ps_voltage_set = ps_state.voltage_set;
+                        self.ps_current_set = ps_state.current_set;
+                        self.ps_ovp = ps_state.ovp;
+                        self.ps_ocp = ps_state.ocp;
+                        // Only update text input buffers if user is NOT editing them
+                        if !self.ps_input_editing {
+                            self.ps_voltage_input = format!("{:.3}", ps_state.voltage_set);
+                            self.ps_current_input = format!("{:.3}", ps_state.current_set);
+                            self.ps_ovp_input = format!("{:.3}", ps_state.ovp);
+                            self.ps_ocp_input = format!("{:.3}", ps_state.ocp);
+                        }
+                    }
+                }
+                if !self.ps_initial_sync_done {
+                    self.ps_initial_sync_done = true;
+                    if self.value_debug {
+                        println!("PS sync: V={:.3} A={:.3} OVP={:.3} OCP={:.3} OUT={}",
+                            ps_state.voltage_set, ps_state.current_set,
+                            ps_state.ovp, ps_state.ocp, ps_state.output_on);
+                    }
+                }
+            }
+        }
+        
+        // Detect if connected device is confirmed non-SPM (has connected and device detected)
+        if self.connection_state == super::ConnectionState::Connected {
+            let device = self.device.lock().unwrap();
+            if !device.is_empty() {
+                let has_ps = self.device_type.lock().unwrap().plugin().supports_power_supply();
+                if !has_ps {
+                    self.ps_confirmed_non_spm = true;
+                }
+            }
+        }
 
         // Handle graph and histogram updates and recording based on the configured interval
         // Skip updates when hold is enabled to freeze the graph
@@ -328,6 +391,21 @@ impl super::MyApp {
                 egui::warn_if_debug_build(ui);
             });
         });
+
+        // Power Supply right side panel
+        // Visible by default. Hidden only when connected to a confirmed non-SPM device.
+        let show_ps_panel = !self.ps_confirmed_non_spm;
+        if show_ps_panel {
+            let is_connected = self.connection_state == super::ConnectionState::Connected;
+            egui::SidePanel::right("power_supply_panel")
+                .resizable(true)
+                .default_width(260.0)
+                .min_width(220.0)
+                .max_width(320.0)
+                .show(ctx, |ui| {
+                    self.show_power_supply_panel(ui, is_connected);
+                });
+        }
 
         egui::CentralPanel::default().show(ctx, |ui| {
             if is_web {
@@ -471,6 +549,7 @@ impl super::MyApp {
                                 1_000_000.0,
                                 0.0001,
                                 &self.metermode,
+                                Some(self.curr_decimals),
                             );
                             ui.label(
                                 egui::RichText::new(formatted_value)
@@ -659,14 +738,14 @@ impl super::MyApp {
                             if ui.add(hold_btn).clicked() {
                                 self.hold_enabled = !self.hold_enabled;
                                 *self.hold_enabled_shared.lock().unwrap() = self.hold_enabled;
-                                println!("Hold toggled via button: {}", self.hold_enabled);
+                                if self.value_debug { println!("Hold toggled via button: {}", self.hold_enabled); }
                                 // Reset last_graph_update when resuming to allow immediate update
                                 if !self.hold_enabled {
                                     self.last_graph_update = 0.0;
                                 }
                                 // Only send hardware hold command if device supports it
                                 let supports_hold = self.device_type.lock().unwrap().plugin().supports_hold();
-                                println!("Device supports hold: {}", supports_hold);
+                                if self.value_debug { println!("Device supports hold: {}", supports_hold); }
                                 if supports_hold {
                                     if let Some(tx) = self.serial_tx.clone() {
                                         let cmd = if self.hold_enabled {
@@ -674,14 +753,15 @@ impl super::MyApp {
                                         } else {
                                             "MULT:HOLD OFF\n".to_string()
                                         };
-                                        println!("Sending hold command: {:?}", cmd);
+                                        if self.value_debug { println!("Sending hold command: {:?}", cmd); }
+                                        let value_debug = self.value_debug;
                                         tokio::spawn(async move {
                                             if let Err(e) = tx.send(cmd).await {
-                                                println!("Failed to queue hold command: {}", e);
+                                                if value_debug { println!("Failed to queue hold command: {}", e); }
                                             }
                                         });
                                     } else {
-                                        println!("serial_tx is None, cannot send hold command");
+                                        if self.value_debug { println!("serial_tx is None, cannot send hold command"); }
                                     }
                                 }
                             }
@@ -718,9 +798,10 @@ impl super::MyApp {
                                     .gen_scpi(self.ratecmd.get_opt(self.curr_rate).0);
                                 if let Some(tx) = self.serial_tx.clone() {
                                     let cmd = self.confstring.clone();
+                                    let value_debug = self.value_debug;
                                     tokio::spawn(async move {
                                         if let Err(e) = tx.send(cmd).await {
-                                            println!("Failed to queue command: {}", e);
+                                            if value_debug { println!("Failed to queue command: {}", e); }
                                         }
                                     });
                                 }
@@ -764,9 +845,10 @@ impl super::MyApp {
                                             println!("User selected range {}: {} - sending to instrument", self.curr_range, scpi_cmd.trim());
                                         }
                                         if let Some(tx) = self.serial_tx.clone() {
+                                            let value_debug = self.value_debug;
                                             tokio::spawn(async move {
                                                 if let Err(e) = tx.send(scpi_cmd).await {
-                                                    println!("Failed to queue range command: {}", e);
+                                                    if value_debug { println!("Failed to queue range command: {}", e); }
                                                 }
                                             });
                                         }
@@ -897,6 +979,295 @@ impl super::MyApp {
             // Show settings and recording windows
             self.show_settings(ctx);
             self.show_recording_window(ctx);
+        });
+    }
+}
+
+impl super::MyApp {
+    /// Helper to send a PS SCPI command via the serial channel
+    fn send_ps_command(&self, cmd: String) {
+        if let Some(tx) = self.serial_tx.clone() {
+            let debug = self.value_debug;
+            tokio::spawn(async move {
+                if let Err(e) = tx.send(cmd.clone()).await {
+                    if debug {
+                        println!("Failed to send PS command '{}': {}", cmd.trim(), e);
+                    }
+                }
+            });
+        }
+    }
+
+    fn show_power_supply_panel(&mut self, ui: &mut egui::Ui, is_connected: bool) {
+        ui.vertical(|ui| {
+            ui.heading("Power Supply");
+            ui.separator();
+            
+            if !is_connected {
+                ui.label(egui::RichText::new("Not connected").italics().color(egui::Color32::GRAY));
+                ui.add_space(8.0);
+            }
+
+            // Output ON/OFF toggle
+            let output_color = if self.ps_output_on {
+                egui::Color32::from_rgb(0, 200, 0)
+            } else {
+                egui::Color32::from_rgb(180, 0, 0)
+            };
+            let output_text = if self.ps_output_on { "OUTPUT ON" } else { "OUTPUT OFF" };
+            let output_btn = egui::Button::new(
+                egui::RichText::new(output_text)
+                    .size(18.0)
+                    .strong()
+                    .color(egui::Color32::WHITE),
+            )
+            .fill(output_color);
+
+            let btn_response = ui.add_enabled_ui(is_connected, |ui| {
+                ui.add_sized([ui.available_width(), 40.0], output_btn)
+            }).inner;
+            if btn_response.clicked() {
+                let new_state = !self.ps_output_on;
+                self.ps_output_on = new_state;
+                self.ps_output_debounce_until = Some(Instant::now() + std::time::Duration::from_millis(500));
+                let cmd = if new_state {
+                    "OUTP ON\n".to_string()
+                } else {
+                    "OUTP OFF\n".to_string()
+                };
+                self.send_ps_command(cmd);
+            }
+
+            ui.add_space(8.0);
+
+            // Output display — compact V/A with smaller unit labels, W row below
+            let readback_frame = egui::Frame {
+                inner_margin: 10.0.into(),
+                corner_radius: 4.0.into(),
+                fill: self.box_background_color,
+                stroke: egui::Stroke::new(1.0, egui::Color32::GRAY),
+                ..Default::default()
+            };
+            readback_frame.show(ui, |ui| {
+                let cyan = egui::Color32::from_rgb(0, 255, 255);
+                let mono = egui::FontFamily::Name("B612Mono-Bold".into());
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new(format!("{:.3}", self.ps_voltage_readback))
+                            .size(22.0)
+                            .color(cyan)
+                            .family(mono.clone()),
+                    );
+                    ui.label(
+                        egui::RichText::new("V")
+                            .size(12.0)
+                            .color(cyan)
+                            .family(mono.clone()),
+                    );
+                    ui.add_space(8.0);
+                    ui.label(
+                        egui::RichText::new(format!("{:.3}", self.ps_current_readback))
+                            .size(22.0)
+                            .color(cyan)
+                            .family(mono.clone()),
+                    );
+                    ui.label(
+                        egui::RichText::new("A")
+                            .size(12.0)
+                            .color(cyan)
+                            .family(mono.clone()),
+                    );
+                });
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new(format!("{:.3}", self.ps_power_readback))
+                            .size(14.0)
+                            .color(egui::Color32::from_rgb(180, 220, 255))
+                            .family(mono.clone()),
+                    );
+                    ui.label(
+                        egui::RichText::new("W")
+                            .size(10.0)
+                            .color(egui::Color32::from_rgb(180, 220, 255))
+                            .family(mono),
+                    );
+                });
+            });
+
+            ui.add_space(8.0);
+            ui.separator();
+
+            // Track if any PS text input has focus to prevent overwrites during editing
+            self.ps_input_editing = false;
+
+            // Voltage setting with up/down buttons
+            ui.label(egui::RichText::new("Voltage (V)").strong());
+            ui.horizontal(|ui| {
+                let response = ui.add_enabled(
+                    is_connected,
+                    egui::TextEdit::singleline(&mut self.ps_voltage_input)
+                        .desired_width(100.0)
+                        .hint_text("0.000"),
+                );
+                let volt_has_focus = response.has_focus();
+                if volt_has_focus { self.ps_input_editing = true; }
+                if ui.add_enabled(is_connected, egui::Button::new("+").min_size(egui::Vec2::new(24.0, 20.0))).clicked() {
+                    if let Ok(v) = self.ps_voltage_input.parse::<f64>() {
+                        let new_v = ((v * 10.0).floor() / 10.0 + 0.1).min(60.0);
+                        self.ps_voltage_input = format!("{:.3}", new_v);
+                        self.ps_voltage_set = new_v;
+                        self.ps_settings_debounce = 2;
+                        self.send_ps_command(format!("VOLT {:.3}\n", new_v));
+                    }
+                }
+                if ui.add_enabled(is_connected, egui::Button::new("-").min_size(egui::Vec2::new(24.0, 20.0))).clicked() {
+                    if let Ok(v) = self.ps_voltage_input.parse::<f64>() {
+                        let new_v = ((v * 10.0).ceil() / 10.0 - 0.1).max(0.0);
+                        self.ps_voltage_input = format!("{:.3}", new_v);
+                        self.ps_voltage_set = new_v;
+                        self.ps_settings_debounce = 2;
+                        self.send_ps_command(format!("VOLT {:.3}\n", new_v));
+                    }
+                }
+                if ui.add_enabled(is_connected, egui::Button::new("Set")).clicked()
+                    || (response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)))
+                {
+                    if let Ok(v) = self.ps_voltage_input.parse::<f64>() {
+                        self.ps_voltage_set = v;
+                        self.ps_settings_debounce = 2;
+                        self.send_ps_command(format!("VOLT {:.3}\n", v));
+                    }
+                }
+            });
+
+            ui.add_space(4.0);
+
+            // Current setting with up/down buttons
+            ui.label(egui::RichText::new("Current (A)").strong());
+            ui.horizontal(|ui| {
+                let response = ui.add_enabled(
+                    is_connected,
+                    egui::TextEdit::singleline(&mut self.ps_current_input)
+                        .desired_width(100.0)
+                        .hint_text("0.000"),
+                );
+                let curr_has_focus = response.has_focus();
+                if curr_has_focus { self.ps_input_editing = true; }
+                if ui.add_enabled(is_connected, egui::Button::new("+").min_size(egui::Vec2::new(24.0, 20.0))).clicked() {
+                    if let Ok(v) = self.ps_current_input.parse::<f64>() {
+                        let new_v = ((v * 10.0).floor() / 10.0 + 0.1).min(3.2);
+                        self.ps_current_input = format!("{:.3}", new_v);
+                        self.ps_current_set = new_v;
+                        self.ps_settings_debounce = 2;
+                        self.send_ps_command(format!("CURR {:.3}\n", new_v));
+                    }
+                }
+                if ui.add_enabled(is_connected, egui::Button::new("-").min_size(egui::Vec2::new(24.0, 20.0))).clicked() {
+                    if let Ok(v) = self.ps_current_input.parse::<f64>() {
+                        let new_v = ((v * 10.0).ceil() / 10.0 - 0.1).max(0.0);
+                        self.ps_current_input = format!("{:.3}", new_v);
+                        self.ps_current_set = new_v;
+                        self.ps_settings_debounce = 2;
+                        self.send_ps_command(format!("CURR {:.3}\n", new_v));
+                    }
+                }
+                if ui.add_enabled(is_connected, egui::Button::new("Set")).clicked()
+                    || (response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)))
+                {
+                    if let Ok(v) = self.ps_current_input.parse::<f64>() {
+                        self.ps_current_set = v;
+                        self.ps_settings_debounce = 2;
+                        self.send_ps_command(format!("CURR {:.3}\n", v));
+                    }
+                }
+            });
+
+            ui.add_space(8.0);
+            ui.separator();
+            ui.label(egui::RichText::new("Protection").strong());
+            ui.add_space(4.0);
+
+            // OVP setting with up/down buttons
+            ui.label("OVP (V)");
+            ui.horizontal(|ui| {
+                let response = ui.add_enabled(
+                    is_connected,
+                    egui::TextEdit::singleline(&mut self.ps_ovp_input)
+                        .desired_width(100.0)
+                        .hint_text("0.000"),
+                );
+                let ovp_has_focus = response.has_focus();
+                if ovp_has_focus { self.ps_input_editing = true; }
+                if ui.add_enabled(is_connected, egui::Button::new("+").min_size(egui::Vec2::new(24.0, 20.0))).clicked() {
+                    if let Ok(v) = self.ps_ovp_input.parse::<f64>() {
+                        let new_v = ((v * 10.0).floor() / 10.0 + 0.1).min(63.0);
+                        self.ps_ovp_input = format!("{:.3}", new_v);
+                        self.ps_ovp = new_v;
+                        self.ps_settings_debounce = 2;
+                        self.send_ps_command(format!("VOLT:LIM {:.3}\n", new_v));
+                    }
+                }
+                if ui.add_enabled(is_connected, egui::Button::new("-").min_size(egui::Vec2::new(24.0, 20.0))).clicked() {
+                    if let Ok(v) = self.ps_ovp_input.parse::<f64>() {
+                        let new_v = ((v * 10.0).ceil() / 10.0 - 0.1).max(0.0);
+                        self.ps_ovp_input = format!("{:.3}", new_v);
+                        self.ps_ovp = new_v;
+                        self.ps_settings_debounce = 2;
+                        self.send_ps_command(format!("VOLT:LIM {:.3}\n", new_v));
+                    }
+                }
+                if ui.add_enabled(is_connected, egui::Button::new("Set")).clicked()
+                    || (response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)))
+                {
+                    if let Ok(v) = self.ps_ovp_input.parse::<f64>() {
+                        self.ps_ovp = v;
+                        self.ps_settings_debounce = 2;
+                        self.send_ps_command(format!("VOLT:LIM {:.3}\n", v));
+                    }
+                }
+            });
+
+            ui.add_space(4.0);
+
+            // OCP setting with up/down buttons
+            ui.label("OCP (A)");
+            ui.horizontal(|ui| {
+                let response = ui.add_enabled(
+                    is_connected,
+                    egui::TextEdit::singleline(&mut self.ps_ocp_input)
+                        .desired_width(100.0)
+                        .hint_text("0.000"),
+                );
+                let ocp_has_focus = response.has_focus();
+                if ocp_has_focus { self.ps_input_editing = true; }
+                if ui.add_enabled(is_connected, egui::Button::new("+").min_size(egui::Vec2::new(24.0, 20.0))).clicked() {
+                    if let Ok(v) = self.ps_ocp_input.parse::<f64>() {
+                        let new_v = ((v * 10.0).floor() / 10.0 + 0.1).min(3.5);
+                        self.ps_ocp_input = format!("{:.3}", new_v);
+                        self.ps_ocp = new_v;
+                        self.ps_settings_debounce = 2;
+                        self.send_ps_command(format!("CURR:LIM {:.3}\n", new_v));
+                    }
+                }
+                if ui.add_enabled(is_connected, egui::Button::new("-").min_size(egui::Vec2::new(24.0, 20.0))).clicked() {
+                    if let Ok(v) = self.ps_ocp_input.parse::<f64>() {
+                        let new_v = ((v * 10.0).ceil() / 10.0 - 0.1).max(0.0);
+                        self.ps_ocp_input = format!("{:.3}", new_v);
+                        self.ps_ocp = new_v;
+                        self.ps_settings_debounce = 2;
+                        self.send_ps_command(format!("CURR:LIM {:.3}\n", new_v));
+                    }
+                }
+                if ui.add_enabled(is_connected, egui::Button::new("Set")).clicked()
+                    || (response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)))
+                {
+                    if let Ok(v) = self.ps_ocp_input.parse::<f64>() {
+                        self.ps_ocp = v;
+                        self.ps_settings_debounce = 2;
+                        self.send_ps_command(format!("CURR:LIM {:.3}\n", v));
+                    }
+                }
+            });
         });
     }
 }

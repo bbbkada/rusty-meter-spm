@@ -1,3 +1,117 @@
+Power SCPI Commands 
+Measurement Commands 
+Measurement commands  query the voltage, current and power measured  on 
+the output terminal of the channels.   
+MEASure[:SCALar]:VOLTage[:DC]? 
+Syntax 
+MEASure:VOLTage? 
+ 
+Description 
+Query the voltage measured on the output terminal of the channel.   
+ 
+Parameter 
+(none) 
+ 
+Example 
+MEAS:VOLT? 
+The voltage measured on the output terminal of the channel is 1V. 
+ 
+Returns 
+1.000 
+ 
+ 
+MEASure[:SCALar]:CURRent[:DC]? 
+Syntax 
+MEASure:CURRent? 
+ 
+Description 
+Query the current measured on the output terminal of the channel.   
+ 
+Parameter 
+6 
+(none) 
+ 
+Example 
+MEAS:CURR? 
+The current measured on the output terminal of the channel is 1A. 
+ 
+Returns 
+1.000 
+ 
+ 
+MEASure[:SCALar]:POWer[:DC]? 
+Syntax 
+MEASure:POWer? 
+ 
+Description 
+Query the power measured on the output terminal of the channel.   
+ 
+Parameter 
+(none) 
+ 
+Example 
+MEAS:POW? 
+The power measured on the output terminal of the channel is 1W. 
+ 
+Returns 
+1.000 
+ 
+MEASure[:SCALar]:ALL[:DC]? 
+Syntax 
+MEASure:ALL? 
+Description 
+This command is used to query the voltage, current and power at the out
+put of the currently selected channel. 
+Parameter 
+(none) 
+Example 
+MEAS[:ALL]? 
+1.000 2.000 2.000 
+The voltage at the output terminal of the currently selected channel is 1V, the 
+7 
+output current is 2A, and the output power is 2W. 
+MEASure[:SCALar]:ALL[:DC]:INFO? 
+Syntax 
+MEASure:ALL:INFO? 
+Description 
+This command is used to query the voltage, current, power and running s
+tatus of the output terminal of the currently selected channel. 
+Parameter 
+(none) 
+Example 
+MEAS:ALL:INFO? 
+2.000 5.000 10.000 NR1 NR2 NR3 NR4 
+The voltage at the output terminal of the currently selected channel is 2V, 
+the output current is 5A, and the output power is 10W. 
+ NR1: Bool, output overvoltage: 1|ON means fault, 0|OFF means normal; 
+ NR2: Bool, output overcurrent: 1|ON means fault, 0|OFF means normal; 
+ NR3: Bool, output over temperature: 1|ON means fault, 0|OFF means nor
+mal;  
+ NR4:Integer , operating mode, 0 means standby mode, 1 means CV mod
+e, 2 means CC mode, 3 means failure mode. 
+ 
+Output Setup Commands 
+The Output setup commands are used to enable or disable the channel output, 
+switch the output mode, as well as set the output value and limit value.   
+OUTPut 
+Syntax 
+OUTPut [:STATe]{0|1|ON|OFF} 
+OUTPut[:STATe]? 
+Description 
+Controls on/off of power supply output. 
+Parameter 
+Name Type Range Default Value 
+{0|1|ON|OFF} Bool   0|1|ON|OFF OFF 
+ 
+Example 
+(1)  The command below enables the channel output. 
+8 
+OUTP ON 
+(2)  The command below queries if the channel is on. If the channels is on, 
+return 1, otherwise return 0. 
+OUTP? 
+Returns 
+1
 8
 
 OUTP ON

@@ -61,7 +61,7 @@ impl DeviceType {
     pub fn func_cmd(&self) -> &'static str {
         match self {
             DeviceType::OwonXdm1041 | DeviceType::Unknown => "FUNC?\n",
-            DeviceType::OwonSpm6103 => "FUNC?\n",
+            DeviceType::OwonSpm6103 => "CONFigure:ALL?\n",  // Same as meas_cmd (already includes mode)
         }
     }
 
