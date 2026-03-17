@@ -3,7 +3,6 @@ use egui_dock::{DockArea, DockState, Style, TabViewer};
 use egui_dropdown::DropDownBox;
 use mio_serial::{DataBits, SerialPort, SerialPortBuilderExt};
 use std::collections::VecDeque;
-use std::time::Instant;
 
 use crate::helpers::{format_measurement, powered_by};
 use crate::multimeter::{GenScpi, MeterMode};
@@ -284,16 +283,19 @@ impl super::MyApp {
         // Handle power supply state updates from serial task
         if let Some(rx) = &mut self.ps_rx {
             while let Ok(ps_state) = rx.try_recv() {
-                // Debounce output_on: ignore device state for 500ms after user toggle
-                let debounce_active = self.ps_output_debounce_until
-                    .map_or(false, |until| Instant::now() < until);
-                if debounce_active {
-                    if self.value_debug {
-                        println!("PS debounce: ignoring output_on={} from device (time-based)", ps_state.output_on);
+                // UI owns the clear: only accept output_on when device confirms expected state
+                {
+                    let mut cmd = self.ps_output_command.lock().unwrap();
+                    if let Some(expected) = *cmd {
+                        if ps_state.output_on == expected {
+                            // Device confirmed — clear command, accept state
+                            *cmd = None;
+                        }
+                        // While command is pending, ps_output_on stays as user set it
+                    } else {
+                        // No pending command — accept device state
+                        self.ps_output_on = ps_state.output_on;
                     }
-                } else {
-                    self.ps_output_debounce_until = None;
-                    self.ps_output_on = ps_state.output_on;
                 }
                 self.ps_voltage_readback = ps_state.voltage_readback;
                 self.ps_current_readback = ps_state.current_readback;
@@ -1029,13 +1031,7 @@ impl super::MyApp {
             if btn_response.clicked() {
                 let new_state = !self.ps_output_on;
                 self.ps_output_on = new_state;
-                self.ps_output_debounce_until = Some(Instant::now() + std::time::Duration::from_millis(500));
-                let cmd = if new_state {
-                    "OUTP ON\n".to_string()
-                } else {
-                    "OUTP OFF\n".to_string()
-                };
-                self.send_ps_command(cmd);
+                *self.ps_output_command.lock().unwrap() = Some(new_state);
             }
 
             ui.add_space(8.0);

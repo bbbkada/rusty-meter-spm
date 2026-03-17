@@ -185,7 +185,7 @@ pub struct MyApp {
     #[serde(skip)]
     ps_output_on: bool,
     #[serde(skip)]
-    ps_output_debounce_until: Option<std::time::Instant>,  // Ignore output_on from device until this time
+    ps_output_command: Arc<Mutex<Option<bool>>>,  // Pending ON/OFF command: None=idle, Some(true)=turn on, Some(false)=turn off
     #[serde(skip)]
     ps_settings_debounce: u32,  // Skip set-value updates from device for N full polls after user interaction
     ps_voltage_set: f64,      // Persistent: user's desired voltage
@@ -306,7 +306,7 @@ impl Default for MyApp {
             plot_dock_state: DockState::new(vec![]), // Initialize empty, populated in update
             // Power supply defaults
             ps_output_on: false,
-            ps_output_debounce_until: None,
+            ps_output_command: Arc::new(Mutex::new(None)),
             ps_settings_debounce: 0,
             ps_voltage_set: 5.0,
             ps_current_set: 1.0,

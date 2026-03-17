@@ -4,8 +4,9 @@ This repository is a fork of **Rusty_meter**, adapted for the **OWON SPM series*
 
 - Developed and tested on **OWON SPM6103**
 - Expected to work on other SPM models using similar SCPI command sets
-- **Multimeter functionality only**
-- Power supply features of the SPM series are **not implemented**
+- Power supply features for the SPM series are implemented in 0.4.3
+
+![screenshot](assets/SPMGui.png)
 
 Compatibility with **OWON XDM series** instruments is untested.
 Some effort has been made to keep the hardware layer modular, but I don't have an XDM instrument to test with.

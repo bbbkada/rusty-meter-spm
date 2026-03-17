@@ -53,6 +53,7 @@ impl super::MyApp {
         let device_type_shared = self.device_type.clone();
         let lock_remote = self.lock_remote;
         let beeper_enabled = self.beeper_enabled;
+        let ps_output_command = self.ps_output_command.clone();
         let cont_threshold = self.cont_threshold;
         let diod_threshold = self.diod_threshold;
         let curr_rate = self.curr_rate;
@@ -600,6 +601,15 @@ impl super::MyApp {
                                         ps_poll_counter = 0;
                                         ps_phase = PsPhase::WaitOutp;
                                         ps_timeout = 0;
+                                        // If user clicked ON/OFF, send the command right before OUTP?
+                                        // so the device processes it before we query state.
+                                        // Never cleared here — only UI clears it after confirmation.
+                                        let pending_cmd = *ps_output_command.lock().unwrap();
+                                        if let Some(on) = pending_cmd {
+                                            let cmd = if on { "OUTP ON\n" } else { "OUTP OFF\n" };
+                                            command_queue.push_back(cmd.to_string());
+                                            if debug { println!("PS: queued pending OUTP {} before OUTP?", if on { "ON" } else { "OFF" }); }
+                                        }
                                         command_queue.push_back("OUTP?\n".to_string());
                                         // Full poll (all settings) every 10th PS poll
                                         ps_full_poll_counter += 1;
