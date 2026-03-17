@@ -242,6 +242,16 @@ impl super::MyApp {
                     // Clear pending mode change flag - mode is now confirmed by instrument
                     self.pending_mode_change = None;
                     
+                    // Clear pending mode from PendingChanges so serial stops re-sending
+                    {
+                        let mut pending = self.pending_changes.lock().unwrap();
+                        if let Some((target, _, _)) = &pending.mode {
+                            if *target == mode {
+                                pending.mode = None;
+                            }
+                        }
+                    }
+                    
                     // Range index updates from instrument will now be accepted from the new mode
                 }
             }
@@ -271,7 +281,26 @@ impl super::MyApp {
                     println!("UI: Received range index update: {} for mode {:?}", range_idx, mode);
                 }
                 
-                // Update curr_range to reflect instrument state for current mode
+                // Skip range updates while user has a pending range change
+                {
+                    let mut pending = self.pending_changes.lock().unwrap();
+                    if let Some((expected_idx, _)) = &pending.range {
+                        if *expected_idx == 0 {
+                            // Auto range: instrument will never report index 0,
+                            // it reports the auto-selected range. Accept any readback
+                            // and clear pending.
+                            pending.range = None;
+                            self.curr_range = 0; // Show "auto" in UI
+                        } else if range_idx == *expected_idx {
+                            // Fixed range: instrument confirmed expected range
+                            pending.range = None;
+                            self.curr_range = range_idx;
+                        } else if self.value_debug {
+                            println!("UI: Ignoring range update {} (pending change to {})", range_idx, expected_idx);
+                        }
+                        continue;
+                    }
+                }
                 self.curr_range = range_idx;
                 
                 if self.value_debug {
@@ -283,42 +312,72 @@ impl super::MyApp {
         // Handle power supply state updates from serial task
         if let Some(rx) = &mut self.ps_rx {
             while let Ok(ps_state) = rx.try_recv() {
-                // UI owns the clear: only accept output_on when device confirms expected state
-                {
-                    let mut cmd = self.ps_output_command.lock().unwrap();
-                    if let Some(expected) = *cmd {
-                        if ps_state.output_on == expected {
-                            // Device confirmed — clear command, accept state
-                            *cmd = None;
-                        }
-                        // While command is pending, ps_output_on stays as user set it
-                    } else {
-                        // No pending command — accept device state
+                // Lock pending_changes MUTABLY — we'll clear fields when readback confirms them.
+                let mut pending = self.pending_changes.lock().unwrap();
+                
+                // Output ON/OFF: accept only if no pending, or if readback confirms expected state
+                if let Some(expected) = pending.output_on {
+                    if ps_state.output_on == expected {
+                        // Instrument confirmed the expected state — clear pending, accept
+                        pending.output_on = None;
                         self.ps_output_on = ps_state.output_on;
                     }
+                    // Otherwise keep pending set, keep UI showing what user clicked
+                } else {
+                    self.ps_output_on = ps_state.output_on;
                 }
+                
+                // Always accept readback (actual measurements)
                 self.ps_voltage_readback = ps_state.voltage_readback;
                 self.ps_current_readback = ps_state.current_readback;
                 self.ps_power_readback = ps_state.power_readback;
+                
                 // Only update set values from full polls (fast polls carry stale set values)
                 if ps_state.includes_settings {
-                    if self.ps_settings_debounce > 0 {
-                        self.ps_settings_debounce -= 1;
-                        if self.value_debug {
-                            println!("PS settings debounce: skipping set-value update (remaining={})", self.ps_settings_debounce);
+                    // For each field: if pending matches readback (within tolerance), clear and accept.
+                    // If pending is set but doesn't match, skip readback (user's value wins).
+                    // If no pending, accept readback.
+                    // ALSO skip text buffer writes if user is actively editing (has focus from last frame).
+                    let editing = self.ps_input_has_focus;
+                    if let Some(pv) = pending.voltage_set {
+                        if (ps_state.voltage_set - pv).abs() < 0.002 {
+                            pending.voltage_set = None;
+                            self.ps_voltage_set = ps_state.voltage_set;
+                            if !editing { self.ps_voltage_input = format!("{:.3}", ps_state.voltage_set); }
                         }
                     } else {
                         self.ps_voltage_set = ps_state.voltage_set;
-                        self.ps_current_set = ps_state.current_set;
-                        self.ps_ovp = ps_state.ovp;
-                        self.ps_ocp = ps_state.ocp;
-                        // Only update text input buffers if user is NOT editing them
-                        if !self.ps_input_editing {
-                            self.ps_voltage_input = format!("{:.3}", ps_state.voltage_set);
-                            self.ps_current_input = format!("{:.3}", ps_state.current_set);
-                            self.ps_ovp_input = format!("{:.3}", ps_state.ovp);
-                            self.ps_ocp_input = format!("{:.3}", ps_state.ocp);
+                        if !editing { self.ps_voltage_input = format!("{:.3}", ps_state.voltage_set); }
+                    }
+                    if let Some(pv) = pending.current_set {
+                        if (ps_state.current_set - pv).abs() < 0.002 {
+                            pending.current_set = None;
+                            self.ps_current_set = ps_state.current_set;
+                            if !editing { self.ps_current_input = format!("{:.3}", ps_state.current_set); }
                         }
+                    } else {
+                        self.ps_current_set = ps_state.current_set;
+                        if !editing { self.ps_current_input = format!("{:.3}", ps_state.current_set); }
+                    }
+                    if let Some(pv) = pending.ovp {
+                        if (ps_state.ovp - pv).abs() < 0.002 {
+                            pending.ovp = None;
+                            self.ps_ovp = ps_state.ovp;
+                            if !editing { self.ps_ovp_input = format!("{:.3}", ps_state.ovp); }
+                        }
+                    } else {
+                        self.ps_ovp = ps_state.ovp;
+                        if !editing { self.ps_ovp_input = format!("{:.3}", ps_state.ovp); }
+                    }
+                    if let Some(pv) = pending.ocp {
+                        if (ps_state.ocp - pv).abs() < 0.002 {
+                            pending.ocp = None;
+                            self.ps_ocp = ps_state.ocp;
+                            if !editing { self.ps_ocp_input = format!("{:.3}", ps_state.ocp); }
+                        }
+                    } else {
+                        self.ps_ocp = ps_state.ocp;
+                        if !editing { self.ps_ocp_input = format!("{:.3}", ps_state.ocp); }
                     }
                 }
                 if !self.ps_initial_sync_done {
@@ -830,30 +889,43 @@ impl super::MyApp {
                                 let mut changed = false;
                                 // Use unique ID per mode to prevent egui from reusing state between modes
                                 let combo_id = format!("range_combo_{:?}", self.metermode);
-                                egui::ComboBox::from_id_salt(combo_id)
-                                    .selected_text(current_text)
-                                    .show_ui(ui, |ui| {
-                                        for (idx, (name, _)) in range_info.ranges.iter().enumerate() {
-                                            if ui.selectable_value(&mut self.curr_range, idx, *name).changed() {
-                                                changed = true;
+                                // Disable combobox if only one range (e.g. Cap with auto only)
+                                let range_enabled = range_info.ranges.len() > 1;
+                                ui.add_enabled_ui(range_enabled, |ui| {
+                                    egui::ComboBox::from_id_salt(combo_id)
+                                        .selected_text(current_text)
+                                        .show_ui(ui, |ui| {
+                                            for (idx, (name, _)) in range_info.ranges.iter().enumerate() {
+                                                if ui.selectable_value(&mut self.curr_range, idx, *name).changed() {
+                                                    changed = true;
+                                                }
                                             }
-                                        }
-                                    });
+                                        });
+                                });
                                 
                                 if changed {
-                                    if let Some((_, scpi_val)) = range_info.ranges.get(self.curr_range) {
-                                        let scpi_cmd = format!("{}{}\n", range_info.scpi_prefix, scpi_val);
+                                    if let Some((name, scpi_val)) = range_info.ranges.get(self.curr_range) {
+                                        // Build the SCPI command string for the selected range
+                                        let cmd_string = if *name == "auto" {
+                                            // Auto mode: use plugin's auto_on_cmd, or fallback to scpi_prefix + AUTO
+                                            if let Some(cmd) = range_info.auto_on_cmd {
+                                                cmd.to_string()
+                                            } else {
+                                                format!("{}AUTO\n", range_info.scpi_prefix)
+                                            }
+                                        } else {
+                                            // Fixed range: optionally prepend auto-off, then range value
+                                            let mut cmds = String::new();
+                                            if let Some(auto_off) = range_info.auto_off_cmd {
+                                                cmds.push_str(auto_off);
+                                            }
+                                            cmds.push_str(&format!("{}{}\n", range_info.scpi_prefix, scpi_val));
+                                            cmds
+                                        };
                                         if self.value_debug {
-                                            println!("User selected range {}: {} - sending to instrument", self.curr_range, scpi_cmd.trim());
+                                            println!("User selected range {}: {} - pending cmd: {}", self.curr_range, name, cmd_string.trim());
                                         }
-                                        if let Some(tx) = self.serial_tx.clone() {
-                                            let value_debug = self.value_debug;
-                                            tokio::spawn(async move {
-                                                if let Err(e) = tx.send(scpi_cmd).await {
-                                                    if value_debug { println!("Failed to queue range command: {}", e); }
-                                                }
-                                            });
-                                        }
+                                        self.pending_changes.lock().unwrap().range = Some((self.curr_range, cmd_string));
                                     }
                                 }
                             }
@@ -986,20 +1058,6 @@ impl super::MyApp {
 }
 
 impl super::MyApp {
-    /// Helper to send a PS SCPI command via the serial channel
-    fn send_ps_command(&self, cmd: String) {
-        if let Some(tx) = self.serial_tx.clone() {
-            let debug = self.value_debug;
-            tokio::spawn(async move {
-                if let Err(e) = tx.send(cmd.clone()).await {
-                    if debug {
-                        println!("Failed to send PS command '{}': {}", cmd.trim(), e);
-                    }
-                }
-            });
-        }
-    }
-
     fn show_power_supply_panel(&mut self, ui: &mut egui::Ui, is_connected: bool) {
         ui.vertical(|ui| {
             ui.heading("Power Supply");
@@ -1031,7 +1089,7 @@ impl super::MyApp {
             if btn_response.clicked() {
                 let new_state = !self.ps_output_on;
                 self.ps_output_on = new_state;
-                *self.ps_output_command.lock().unwrap() = Some(new_state);
+                self.pending_changes.lock().unwrap().output_on = Some(new_state);
             }
 
             ui.add_space(8.0);
@@ -1093,8 +1151,8 @@ impl super::MyApp {
             ui.add_space(8.0);
             ui.separator();
 
-            // Track if any PS text input has focus to prevent overwrites during editing
-            self.ps_input_editing = false;
+            // Track focus across all PS text inputs this frame
+            let mut any_ps_focus = false;
 
             // Voltage setting with up/down buttons
             ui.label(egui::RichText::new("Voltage (V)").strong());
@@ -1105,15 +1163,13 @@ impl super::MyApp {
                         .desired_width(100.0)
                         .hint_text("0.000"),
                 );
-                let volt_has_focus = response.has_focus();
-                if volt_has_focus { self.ps_input_editing = true; }
+                if response.has_focus() { any_ps_focus = true; }
                 if ui.add_enabled(is_connected, egui::Button::new("+").min_size(egui::Vec2::new(24.0, 20.0))).clicked() {
                     if let Ok(v) = self.ps_voltage_input.parse::<f64>() {
                         let new_v = ((v * 10.0).floor() / 10.0 + 0.1).min(60.0);
                         self.ps_voltage_input = format!("{:.3}", new_v);
                         self.ps_voltage_set = new_v;
-                        self.ps_settings_debounce = 2;
-                        self.send_ps_command(format!("VOLT {:.3}\n", new_v));
+                        self.pending_changes.lock().unwrap().voltage_set = Some(new_v);
                     }
                 }
                 if ui.add_enabled(is_connected, egui::Button::new("-").min_size(egui::Vec2::new(24.0, 20.0))).clicked() {
@@ -1121,8 +1177,7 @@ impl super::MyApp {
                         let new_v = ((v * 10.0).ceil() / 10.0 - 0.1).max(0.0);
                         self.ps_voltage_input = format!("{:.3}", new_v);
                         self.ps_voltage_set = new_v;
-                        self.ps_settings_debounce = 2;
-                        self.send_ps_command(format!("VOLT {:.3}\n", new_v));
+                        self.pending_changes.lock().unwrap().voltage_set = Some(new_v);
                     }
                 }
                 if ui.add_enabled(is_connected, egui::Button::new("Set")).clicked()
@@ -1130,8 +1185,7 @@ impl super::MyApp {
                 {
                     if let Ok(v) = self.ps_voltage_input.parse::<f64>() {
                         self.ps_voltage_set = v;
-                        self.ps_settings_debounce = 2;
-                        self.send_ps_command(format!("VOLT {:.3}\n", v));
+                        self.pending_changes.lock().unwrap().voltage_set = Some(v);
                     }
                 }
             });
@@ -1147,15 +1201,13 @@ impl super::MyApp {
                         .desired_width(100.0)
                         .hint_text("0.000"),
                 );
-                let curr_has_focus = response.has_focus();
-                if curr_has_focus { self.ps_input_editing = true; }
+                if response.has_focus() { any_ps_focus = true; }
                 if ui.add_enabled(is_connected, egui::Button::new("+").min_size(egui::Vec2::new(24.0, 20.0))).clicked() {
                     if let Ok(v) = self.ps_current_input.parse::<f64>() {
                         let new_v = ((v * 10.0).floor() / 10.0 + 0.1).min(3.2);
                         self.ps_current_input = format!("{:.3}", new_v);
                         self.ps_current_set = new_v;
-                        self.ps_settings_debounce = 2;
-                        self.send_ps_command(format!("CURR {:.3}\n", new_v));
+                        self.pending_changes.lock().unwrap().current_set = Some(new_v);
                     }
                 }
                 if ui.add_enabled(is_connected, egui::Button::new("-").min_size(egui::Vec2::new(24.0, 20.0))).clicked() {
@@ -1163,8 +1215,7 @@ impl super::MyApp {
                         let new_v = ((v * 10.0).ceil() / 10.0 - 0.1).max(0.0);
                         self.ps_current_input = format!("{:.3}", new_v);
                         self.ps_current_set = new_v;
-                        self.ps_settings_debounce = 2;
-                        self.send_ps_command(format!("CURR {:.3}\n", new_v));
+                        self.pending_changes.lock().unwrap().current_set = Some(new_v);
                     }
                 }
                 if ui.add_enabled(is_connected, egui::Button::new("Set")).clicked()
@@ -1172,8 +1223,7 @@ impl super::MyApp {
                 {
                     if let Ok(v) = self.ps_current_input.parse::<f64>() {
                         self.ps_current_set = v;
-                        self.ps_settings_debounce = 2;
-                        self.send_ps_command(format!("CURR {:.3}\n", v));
+                        self.pending_changes.lock().unwrap().current_set = Some(v);
                     }
                 }
             });
@@ -1192,15 +1242,13 @@ impl super::MyApp {
                         .desired_width(100.0)
                         .hint_text("0.000"),
                 );
-                let ovp_has_focus = response.has_focus();
-                if ovp_has_focus { self.ps_input_editing = true; }
+                if response.has_focus() { any_ps_focus = true; }
                 if ui.add_enabled(is_connected, egui::Button::new("+").min_size(egui::Vec2::new(24.0, 20.0))).clicked() {
                     if let Ok(v) = self.ps_ovp_input.parse::<f64>() {
                         let new_v = ((v * 10.0).floor() / 10.0 + 0.1).min(63.0);
                         self.ps_ovp_input = format!("{:.3}", new_v);
                         self.ps_ovp = new_v;
-                        self.ps_settings_debounce = 2;
-                        self.send_ps_command(format!("VOLT:LIM {:.3}\n", new_v));
+                        self.pending_changes.lock().unwrap().ovp = Some(new_v);
                     }
                 }
                 if ui.add_enabled(is_connected, egui::Button::new("-").min_size(egui::Vec2::new(24.0, 20.0))).clicked() {
@@ -1208,8 +1256,7 @@ impl super::MyApp {
                         let new_v = ((v * 10.0).ceil() / 10.0 - 0.1).max(0.0);
                         self.ps_ovp_input = format!("{:.3}", new_v);
                         self.ps_ovp = new_v;
-                        self.ps_settings_debounce = 2;
-                        self.send_ps_command(format!("VOLT:LIM {:.3}\n", new_v));
+                        self.pending_changes.lock().unwrap().ovp = Some(new_v);
                     }
                 }
                 if ui.add_enabled(is_connected, egui::Button::new("Set")).clicked()
@@ -1217,8 +1264,7 @@ impl super::MyApp {
                 {
                     if let Ok(v) = self.ps_ovp_input.parse::<f64>() {
                         self.ps_ovp = v;
-                        self.ps_settings_debounce = 2;
-                        self.send_ps_command(format!("VOLT:LIM {:.3}\n", v));
+                        self.pending_changes.lock().unwrap().ovp = Some(v);
                     }
                 }
             });
@@ -1234,15 +1280,13 @@ impl super::MyApp {
                         .desired_width(100.0)
                         .hint_text("0.000"),
                 );
-                let ocp_has_focus = response.has_focus();
-                if ocp_has_focus { self.ps_input_editing = true; }
+                if response.has_focus() { any_ps_focus = true; }
                 if ui.add_enabled(is_connected, egui::Button::new("+").min_size(egui::Vec2::new(24.0, 20.0))).clicked() {
                     if let Ok(v) = self.ps_ocp_input.parse::<f64>() {
                         let new_v = ((v * 10.0).floor() / 10.0 + 0.1).min(3.5);
                         self.ps_ocp_input = format!("{:.3}", new_v);
                         self.ps_ocp = new_v;
-                        self.ps_settings_debounce = 2;
-                        self.send_ps_command(format!("CURR:LIM {:.3}\n", new_v));
+                        self.pending_changes.lock().unwrap().ocp = Some(new_v);
                     }
                 }
                 if ui.add_enabled(is_connected, egui::Button::new("-").min_size(egui::Vec2::new(24.0, 20.0))).clicked() {
@@ -1250,8 +1294,7 @@ impl super::MyApp {
                         let new_v = ((v * 10.0).ceil() / 10.0 - 0.1).max(0.0);
                         self.ps_ocp_input = format!("{:.3}", new_v);
                         self.ps_ocp = new_v;
-                        self.ps_settings_debounce = 2;
-                        self.send_ps_command(format!("CURR:LIM {:.3}\n", new_v));
+                        self.pending_changes.lock().unwrap().ocp = Some(new_v);
                     }
                 }
                 if ui.add_enabled(is_connected, egui::Button::new("Set")).clicked()
@@ -1259,11 +1302,14 @@ impl super::MyApp {
                 {
                     if let Ok(v) = self.ps_ocp_input.parse::<f64>() {
                         self.ps_ocp = v;
-                        self.ps_settings_debounce = 2;
-                        self.send_ps_command(format!("CURR:LIM {:.3}\n", v));
+                        self.pending_changes.lock().unwrap().ocp = Some(v);
                     }
                 }
             });
+
+            // Store focus state for next frame - the PS receiver uses this
+            // to avoid overwriting text buffers while user is typing
+            self.ps_input_has_focus = any_ps_focus;
         });
     }
 }

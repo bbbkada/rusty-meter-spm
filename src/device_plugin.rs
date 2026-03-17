@@ -12,6 +12,31 @@ fn count_decimals(s: &str) -> usize {
     }
 }
 
+/// Extract SI prefix multiplier from a unit suffix string.
+/// e.g. "mV" -> 0.001, "kOhm" -> 1000, "nF" -> 1e-9, "V" -> 1.0, "MOhm" -> 1e6
+fn extract_si_multiplier(unit_suffix: &str) -> f64 {
+    if unit_suffix.is_empty() {
+        return 1.0;
+    }
+    // Check first character for SI prefix
+    match unit_suffix.chars().next().unwrap() {
+        'n' => 1e-9,       // nano: nF
+        'u' | 'μ' => 1e-6, // micro: uF, μF
+        'm' => {
+            // 'm' could be milli (mV, mA) or start of unit (MOhm is uppercase M)
+            // Since unit_suffix comes after numeric part, "mV" = milli, "mA" = milli
+            0.001
+        }
+        'k' => 1e3,        // kilo: kOhm, kHz
+        'M' => {
+            // Mega: MOhm (but not "mV" which starts lowercase)
+            1e6
+        }
+        'G' => 1e9,        // Giga: GOhm, GHz
+        _ => 1.0,          // No prefix, just base unit (V, A, Ohm, F, Hz, etc.)
+    }
+}
+
 /// Result of parsing a device response
 #[derive(Debug)]
 pub struct ParseResult {
@@ -26,6 +51,8 @@ pub struct ParseResult {
 pub struct RangeInfo {
     pub scpi_prefix: &'static str,
     pub ranges: Vec<(&'static str, &'static str)>, // (display_name, scpi_value)
+    pub auto_on_cmd: Option<&'static str>,   // SCPI command to enable auto range (None = use scpi_prefix + "AUTO")
+    pub auto_off_cmd: Option<&'static str>,  // SCPI command to disable auto range before setting fixed range
 }
 
 /// Power supply limits for a device with integrated PSU
@@ -37,6 +64,39 @@ pub struct PowerSupplyLimits {
     pub current_max: f64,
     pub ovp_max: f64,
     pub ocp_max: f64,
+}
+
+/// Pending GUI changes awaiting communication with the instrument.
+/// Each field is Option<T>: None = no pending change, Some(v) = user wants this value.
+/// Shared between UI thread and serial task via Arc<Mutex<>>.
+///
+/// Rules:
+/// 1. GUI sets fields freely (latest value wins, no queuing)
+/// 2. Serial task reads & clears at the start of each PS poll cycle, sends commands
+/// 3. UI receiver skips instrument readback for any field that still has a pending change
+/// 4. Fields are cleared by serial task ONLY after the command has been sent AND the
+///    response cycle completes (so the next readback reflects the new value)
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PendingChanges {
+    pub output_on: Option<bool>,
+    pub voltage_set: Option<f64>,
+    pub current_set: Option<f64>,
+    pub ovp: Option<f64>,
+    pub ocp: Option<f64>,
+    pub range: Option<(usize, String)>,  // (range_index, full SCPI command string to send)
+    pub mode: Option<(MeterMode, String, u32)>,  // (target mode, SCPI command, retries remaining)
+}
+
+impl PendingChanges {
+    pub fn has_any(&self) -> bool {
+        self.output_on.is_some()
+            || self.voltage_set.is_some()
+            || self.current_set.is_some()
+            || self.ovp.is_some()
+            || self.ocp.is_some()
+            || self.range.is_some()
+            || self.mode.is_some()
+    }
 }
 
 /// Power supply readback state received from device
@@ -181,6 +241,8 @@ impl DevicePlugin for Xdm1041Plugin {
         match mode {
             MeterMode::Vdc => Some(RangeInfo {
                 scpi_prefix: "CONF:VOLT:DC ",
+                auto_on_cmd: None,  // XDM1041: "CONF:VOLT:DC AUTO" works
+                auto_off_cmd: None,
                 ranges: vec![
                     ("auto", "AUTO"),
                     ("50mV", "50E-3"),
@@ -193,6 +255,8 @@ impl DevicePlugin for Xdm1041Plugin {
             }),
             MeterMode::Vac => Some(RangeInfo {
                 scpi_prefix: "CONF:VOLT:AC ",
+                auto_on_cmd: None,
+                auto_off_cmd: None,
                 ranges: vec![
                     ("auto", "AUTO"),
                     ("500mV", "500E-3"),
@@ -204,6 +268,8 @@ impl DevicePlugin for Xdm1041Plugin {
             }),
             MeterMode::Adc => Some(RangeInfo {
                 scpi_prefix: "CONF:CURR:DC ",
+                auto_on_cmd: None,
+                auto_off_cmd: None,
                 ranges: vec![
                     ("500uA", "500E-6"),
                     ("5mA", "5E-3"),
@@ -215,6 +281,8 @@ impl DevicePlugin for Xdm1041Plugin {
             }),
             MeterMode::Aac => Some(RangeInfo {
                 scpi_prefix: "CONF:CURR:AC ",
+                auto_on_cmd: None,
+                auto_off_cmd: None,
                 ranges: vec![
                     ("500uA", "500E-6"),
                     ("5mA", "5E-3"),
@@ -226,6 +294,8 @@ impl DevicePlugin for Xdm1041Plugin {
             }),
             MeterMode::Res => Some(RangeInfo {
                 scpi_prefix: "CONF:RES ",
+                auto_on_cmd: None,
+                auto_off_cmd: None,
                 ranges: vec![
                     ("auto", "AUTO"),
                     ("500Ohm", "500"),
@@ -238,6 +308,8 @@ impl DevicePlugin for Xdm1041Plugin {
             }),
             MeterMode::Cap => Some(RangeInfo {
                 scpi_prefix: "CONF:CAP ",
+                auto_on_cmd: None,
+                auto_off_cmd: None,
                 ranges: vec![
                     ("auto", "AUTO"),
                     ("50nF", "50E-9"),
@@ -251,6 +323,8 @@ impl DevicePlugin for Xdm1041Plugin {
             }),
             MeterMode::Temp => Some(RangeInfo {
                 scpi_prefix: "CONF:TEMP:RTD ",
+                auto_on_cmd: None,
+                auto_off_cmd: None,
                 ranges: vec![
                     ("PT100", "PT100"),
                     ("K-type (KITS90)", "KITS90"),
@@ -398,35 +472,50 @@ impl DevicePlugin for Spm6103Plugin {
             // Overload/Open Load
             Some(1e9)
         } else {
-            // Remove all trailing alphabetic characters (units like V, A, mA, Ohm, etc.)
+            // Extract unit suffix and apply SI prefix to convert to base unit.
+            // e.g. "+20.44mV" -> numeric=20.44, unit="mV", multiplier=0.001 -> 0.02044 V
+            // This ensures graphs and recordings always use base units.
             let numeric_part = value_str.trim_end_matches(|c: char| c.is_alphabetic());
-            numeric_part.parse::<f64>().ok()
+            let unit_suffix = &value_str[numeric_part.len()..];
+            let multiplier = extract_si_multiplier(unit_suffix);
+            numeric_part.parse::<f64>().ok().map(|v| v * multiplier)
         };
         
-        // Count decimals from raw value string
+        // Count decimals, adjusting for SI prefix conversion.
+        // e.g. "+20.44mV" has 2 raw decimals, but after milli conversion (0.02044) needs 5 decimals to preserve precision.
         let decimals = {
             let numeric_part = value_str.trim_end_matches(|c: char| c.is_alphabetic());
-            Some(count_decimals(numeric_part))
+            let unit_suffix = &value_str[numeric_part.len()..];
+            let raw = count_decimals(numeric_part);
+            let si_extra = match extract_si_multiplier(unit_suffix) {
+                m if m <= 1e-9 + f64::EPSILON && m >= 1e-9 - f64::EPSILON => 9,  // nano
+                m if m <= 1e-6 + f64::EPSILON && m >= 1e-6 - f64::EPSILON => 6,  // micro
+                m if (m - 0.001).abs() < f64::EPSILON => 3,                       // milli
+                m if (m - 1000.0).abs() < f64::EPSILON => 0,                      // kilo (fewer decimals ok)
+                m if (m - 1e6).abs() < f64::EPSILON => 0,                         // mega
+                _ => 0,                                                           // no prefix
+            };
+            Some(raw + si_extra)
         };
         
         // Extract range - check STATUS field (3rd) first for AUTO/Manual
         let range_index = if parts.len() >= 3 && detected_mode.is_some() {
             let status = parts[2].trim();
+            let mode = detected_mode.unwrap();
             
-            // If status is AUTO, range index should be 0 (auto)
-            if status.eq_ignore_ascii_case("AUTO") {
+            // Check if this mode has an "auto" entry in its range list
+            let has_auto = self.range_info(mode)
+                .map(|ri| ri.ranges.first().map(|(name, _)| *name == "auto").unwrap_or(false))
+                .unwrap_or(false);
+            
+            if status.eq_ignore_ascii_case("AUTO") && has_auto {
+                // Auto mode and mode supports it — index 0 is auto
                 Some(0)
             } else if parts.len() >= 4 {
-                // Manual mode - parse the actual range from 4th field
+                // Manual mode, or auto mode without auto entry — parse range value
                 let range_str = parts[3].trim();
                 if !range_str.is_empty() {
-                    let idx = self.parse_range_response(range_str, detected_mode.unwrap());
-                    if idx.is_some() {
-                        println!("DEBUG: parse_measurement extracted range '{}' -> index {:?}", range_str, idx);
-                    } else {
-                        println!("DEBUG: parse_measurement failed to parse range '{}'", range_str);
-                    }
-                    idx
+                    self.parse_range_response(range_str, mode)
                 } else {
                     None
                 }
@@ -471,6 +560,8 @@ impl DevicePlugin for Spm6103Plugin {
         match mode {
             MeterMode::Vdc => Some(RangeInfo {
                 scpi_prefix: "SENS:VOLT:DC:RANG ",
+                auto_on_cmd: Some("VOLT:DC:RANG:AUTO ON\n"),
+                auto_off_cmd: Some("VOLT:DC:RANG:AUTO OFF\n"),
                 ranges: vec![
                     ("auto", "AUTO"),
                     ("200mV", "200E-3"),
@@ -482,6 +573,8 @@ impl DevicePlugin for Spm6103Plugin {
             }),
             MeterMode::Vac => Some(RangeInfo {
                 scpi_prefix: "SENS:VOLT:AC:RANG ",
+                auto_on_cmd: Some("VOLT:AC:RANG:AUTO ON\n"),
+                auto_off_cmd: Some("VOLT:AC:RANG:AUTO OFF\n"),
                 ranges: vec![
                     ("auto", "AUTO"),
                     ("200mV", "200E-3"),
@@ -493,6 +586,8 @@ impl DevicePlugin for Spm6103Plugin {
             }),
             MeterMode::Adc => Some(RangeInfo {
                 scpi_prefix: "SENS:CURR:DC:RANG ",
+                auto_on_cmd: None,  // No auto for current on SPM6103
+                auto_off_cmd: None,
                 ranges: vec![
                     ("200mA", "200E-3"),
                     ("10A", "10"),
@@ -500,6 +595,8 @@ impl DevicePlugin for Spm6103Plugin {
             }),
             MeterMode::Aac => Some(RangeInfo {
                 scpi_prefix: "SENS:CURR:AC:RANG ",
+                auto_on_cmd: None,
+                auto_off_cmd: None,
                 ranges: vec![
                     ("200mA", "200E-3"),
                     ("10A", "10"),
@@ -507,6 +604,8 @@ impl DevicePlugin for Spm6103Plugin {
             }),
             MeterMode::Res => Some(RangeInfo {
                 scpi_prefix: "SENS:RES:RANG ",
+                auto_on_cmd: Some("RES:RANG:AUTO ON\n"),
+                auto_off_cmd: Some("RES:RANG:AUTO OFF\n"),
                 ranges: vec![
                     ("auto", "AUTO"),
                     ("200Ohm", "200"),
@@ -520,16 +619,10 @@ impl DevicePlugin for Spm6103Plugin {
             }),
             MeterMode::Cap => Some(RangeInfo {
                 scpi_prefix: "SENS:CAP:RANG ",
+                auto_on_cmd: None,
+                auto_off_cmd: None,
                 ranges: vec![
                     ("auto", "AUTO"),
-                    ("2nF", "2E-9"),
-                    ("20nF", "20E-9"),
-                    ("200nF", "200E-9"),
-                    ("2uF", "2E-6"),
-                    ("20uF", "20E-6"),
-                    ("200uF", "200E-6"),
-                    ("2mF", "2E-3"),
-                    ("20mF", "20E-3"),
                 ],
             }),
             _ => None,
@@ -570,9 +663,12 @@ impl DevicePlugin for Spm6103Plugin {
         
         // Get range info for this mode
         if let Some(range_info) = self.range_info(mode) {
-            // Check for AUTO first
+            // Check for AUTO — only return index 0 if the mode actually has "auto" in its range list
             if trimmed.eq_ignore_ascii_case("AUTO") {
-                return Some(0); // Auto is always index 0
+                if range_info.ranges.first().map(|(name, _)| *name == "auto").unwrap_or(false) {
+                    return Some(0);
+                }
+                // Mode has no auto entry — fall through to try matching as range value
             }
             
             // Normalize response: remove spaces and convert to lowercase for matching

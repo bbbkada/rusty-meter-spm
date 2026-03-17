@@ -185,9 +185,7 @@ pub struct MyApp {
     #[serde(skip)]
     ps_output_on: bool,
     #[serde(skip)]
-    ps_output_command: Arc<Mutex<Option<bool>>>,  // Pending ON/OFF command: None=idle, Some(true)=turn on, Some(false)=turn off
-    #[serde(skip)]
-    ps_settings_debounce: u32,  // Skip set-value updates from device for N full polls after user interaction
+    pending_changes: Arc<Mutex<crate::device_plugin::PendingChanges>>,  // Shared pending GUI changes
     ps_voltage_set: f64,      // Persistent: user's desired voltage
     ps_current_set: f64,      // Persistent: user's desired current
     ps_ovp: f64,              // Persistent: overvoltage protection
@@ -211,7 +209,7 @@ pub struct MyApp {
     #[serde(skip)]
     ps_ocp_input: String,      // Text input buffer for OCP
     #[serde(skip)]
-    ps_input_editing: bool,    // True when any PS text input has focus (set during rendering, checked next frame)
+    ps_input_has_focus: bool,  // True if any PS text input had focus last frame
     #[serde(skip)]
     ps_confirmed_non_spm: bool, // Set to true when connected device is confirmed as non-SPM
 }
@@ -306,8 +304,7 @@ impl Default for MyApp {
             plot_dock_state: DockState::new(vec![]), // Initialize empty, populated in update
             // Power supply defaults
             ps_output_on: false,
-            ps_output_command: Arc::new(Mutex::new(None)),
-            ps_settings_debounce: 0,
+            pending_changes: Arc::new(Mutex::new(crate::device_plugin::PendingChanges::default())),
             ps_voltage_set: 5.0,
             ps_current_set: 1.0,
             ps_ovp: 32.0,
@@ -321,7 +318,7 @@ impl Default for MyApp {
             ps_current_input: "1.000".to_string(),
             ps_ovp_input: "32.000".to_string(),
             ps_ocp_input: "3.200".to_string(),
-            ps_input_editing: false,
+            ps_input_has_focus: false,
             ps_confirmed_non_spm: false,
         }
     }
@@ -401,18 +398,19 @@ impl MyApp {
         let mode_cmd = device_type.mode_cmd(mode);
         let supports_beeper = device_type.plugin().supports_beeper();
         let supports_threshold = device_type.plugin().supports_threshold();
-        
-        // NOTE: Range command is now sent from ui.rs when mode change is confirmed by instrument
-        // (saved_range_idx is kept in function signature for backward compatibility)
         drop(device_type); // Release the lock
         
         self.confstring = mode_cmd.clone();
         
-        if let Some(tx) = self.serial_tx.clone() {
-            let value_debug = self.value_debug;
-            let cont_threshold = self.cont_threshold;
-            let diod_threshold = self.diod_threshold;
-            if let Some(beep) = beeper_enabled {
+        // Set pending mode change — serial task will send and re-send until instrument confirms
+        self.pending_changes.lock().unwrap().mode = Some((mode, mode_cmd.clone(), 5));
+        
+        // Beeper/threshold are best-effort, send once via channel
+        if let Some(beep) = beeper_enabled {
+            if let Some(tx) = self.serial_tx.clone() {
+                let value_debug = self.value_debug;
+                let cont_threshold = self.cont_threshold;
+                let diod_threshold = self.diod_threshold;
                 let beeper_cmd = if supports_beeper {
                     if beep {
                         Some("SYST:BEEP:STATe ON\n".to_string())
@@ -432,51 +430,16 @@ impl MyApp {
                     None
                 };
                 tokio::spawn(async move {
-                    // Queue mode command
-                    if let Err(e) = tx.send(mode_cmd.clone()).await {
-                        if value_debug {
-                            println!("Failed to queue mode command: {}", e);
-                        }
-                    } else if value_debug {
-                        println!("Mode command queued: {}", mode_cmd);
-                    }
-                    
-                    // NOTE: Range command is now sent from ui.rs when mode change is confirmed by instrument
-                    
-                    // Queue beeper command if supported
                     if let Some(cmd) = beeper_cmd {
                         if let Err(e) = tx.send(cmd.clone()).await {
-                            if value_debug {
-                                println!("Failed to queue beeper command: {}", e);
-                            }
-                        } else if value_debug {
-                            println!("Beeper command queued: {}", cmd);
+                            if value_debug { println!("Failed to queue beeper command: {}", e); }
                         }
                     }
-                    
-                    // Queue threshold command if supported
                     if let Some(cmd) = threshold_cmd {
                         if let Err(e) = tx.send(cmd.clone()).await {
-                            if value_debug {
-                                println!("Failed to queue threshold command: {}", e);
-                            }
-                        } else if value_debug {
-                            println!("Threshold command queued: {}", cmd);
+                            if value_debug { println!("Failed to queue threshold command: {}", e); }
                         }
                     }
-                });
-            } else {
-                tokio::spawn(async move {
-                    // Queue mode command
-                    if let Err(e) = tx.send(mode_cmd.clone()).await {
-                        if value_debug {
-                            println!("Failed to queue mode command: {}", e);
-                        }
-                    } else if value_debug {
-                        println!("Mode command queued: {}", mode_cmd);
-                    }
-                    
-                    // NOTE: Range command is now sent from ui.rs when mode change is confirmed by instrument
                 });
             }
         }
@@ -508,5 +471,6 @@ impl MyApp {
         self.ps_power_readback = 0.0;
         self.ps_initial_sync_done = false; // Reset PS sync flag
         self.ps_confirmed_non_spm = false; // Reset PS visibility flag
+        *self.pending_changes.lock().unwrap() = crate::device_plugin::PendingChanges::default(); // Clear pending changes
     }
 }

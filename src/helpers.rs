@@ -45,13 +45,16 @@ pub fn format_measurement(
     .to_string();
 
     // Adjust value and unit based on mode and magnitude
+    // Track how many orders of magnitude we scale, to adjust raw_decimals
+    let mut scale_decimal_adjust: usize = 0;
     match meter_mode {
         MeterMode::Vdc | MeterMode::Vac => {
-            // Values < 1V stay as V (e.g. 0.0121 V) — no mV scaling
+            // Values stay as V — instrument already provides correct scale via SI prefix
         }
         MeterMode::Adc | MeterMode::Aac => {
             if abs_value < 1.0 {
                 display_value = value * 1000.0;
+                scale_decimal_adjust = 3;
                 display_unit = if matches!(meter_mode, MeterMode::Adc) {
                     "mADC"
                 } else {
@@ -63,9 +66,11 @@ pub fn format_measurement(
         MeterMode::Res | MeterMode::Cont => {
             if abs_value >= 1_000_000.0 {
                 display_value = value / 1_000_000.0;
+                scale_decimal_adjust = 6;
                 display_unit = "MOhm".to_string();
             } else if abs_value >= 1_000.0 {
                 display_value = value / 1_000.0;
+                scale_decimal_adjust = 3;
                 display_unit = "kOhm".to_string();
             }
             // Values < 1 Ohm stay as Ohm (e.g. 0.330 Ohm) — no mOhm scaling
@@ -73,23 +78,33 @@ pub fn format_measurement(
         MeterMode::Cap => {
             if abs_value >= 0.001 {
                 display_value = value * 1000.0;
+                scale_decimal_adjust = 3;
                 display_unit = "mF".to_string();
             } else if abs_value >= 0.000_001 {
                 display_value = value * 1_000_000.0;
+                scale_decimal_adjust = 6;
                 display_unit = "μF".to_string();
-            } else if abs_value > 0.0 {
+            } else {
+                // nF range, including zero
                 display_value = value * 1_000_000_000.0;
+                scale_decimal_adjust = 9;
                 display_unit = "nF".to_string();
             }
         }
         MeterMode::Per => {
             if abs_value < 1.0 {
                 display_value = value * 1000.0;
+                scale_decimal_adjust = 3;
                 display_unit = "ms".to_string();
             }
         }
         _ => {}
     }
+
+    // Adjust raw_decimals to compensate for display scaling.
+    // e.g. instrument sends +2.340nF → parsed as 0.00000000234 F with 12 decimals.
+    // We scale ×1e9 to show 2.340 nF, so subtract 9 → 3 decimals.
+    let adjusted_decimals = raw_decimals.map(|d| d.saturating_sub(scale_decimal_adjust));
 
     let abs_display_value = display_value.abs();
 
@@ -98,7 +113,7 @@ pub fn format_measurement(
         || (abs_display_value < sci_threshold_low && abs_display_value > 0.0)
     {
         format!("{:>width$.3e}", display_value, width = max_digits)
-    } else if let Some(decimals) = raw_decimals {
+    } else if let Some(decimals) = adjusted_decimals {
         // Use exact decimal count from instrument
         format!("{:>width$.*}", decimals, display_value, width = max_digits)
     } else {

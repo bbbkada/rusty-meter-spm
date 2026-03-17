@@ -53,7 +53,7 @@ impl super::MyApp {
         let device_type_shared = self.device_type.clone();
         let lock_remote = self.lock_remote;
         let beeper_enabled = self.beeper_enabled;
-        let ps_output_command = self.ps_output_command.clone();
+        let pending_changes = self.pending_changes.clone();
         let cont_threshold = self.cont_threshold;
         let diod_threshold = self.diod_threshold;
         let curr_rate = self.curr_rate;
@@ -582,6 +582,20 @@ impl super::MyApp {
                             if ps_phase != PsPhase::Idle {
                                 if debug { println!("[SERIAL] Idle: PS active (phase={:?}), waiting", ps_phase); }
                             } else {
+                                // Send pending mode command before measurement query.
+                                // Re-sent every cycle until UI confirms mode change via readback,
+                                // but limited to avoid flooding the instrument.
+                                {
+                                    let mut changes = pending_changes.lock().unwrap();
+                                    if let Some((target_mode, ref cmd, retries)) = changes.mode.clone() {
+                                        if retries > 0 {
+                                            command_queue.push_back(cmd.clone());
+                                            changes.mode = Some((target_mode, cmd.clone(), retries - 1));
+                                            if debug { println!("Pending mode cmd (retries left={})", retries - 1); }
+                                        }
+                                    }
+                                }
+                                
                                 // Normal operation: queue measurement or function query
                                 if meas_count >= 10 {
                                     let device_type = device_type_shared.lock().unwrap();
@@ -601,14 +615,40 @@ impl super::MyApp {
                                         ps_poll_counter = 0;
                                         ps_phase = PsPhase::WaitOutp;
                                         ps_timeout = 0;
-                                        // If user clicked ON/OFF, send the command right before OUTP?
-                                        // so the device processes it before we query state.
-                                        // Never cleared here — only UI clears it after confirmation.
-                                        let pending_cmd = *ps_output_command.lock().unwrap();
-                                        if let Some(on) = pending_cmd {
+                                        // Send ALL pending GUI changes every poll cycle.
+                                        // SET commands are idempotent — safe to re-send until
+                                        // the UI clears the pending field upon readback confirmation.
+                                        // This guarantees delivery even if a command is lost.
+                                        let changes = pending_changes.lock().unwrap().clone();
+                                        if let Some(on) = changes.output_on {
                                             let cmd = if on { "OUTP ON\n" } else { "OUTP OFF\n" };
                                             command_queue.push_back(cmd.to_string());
-                                            if debug { println!("PS: queued pending OUTP {} before OUTP?", if on { "ON" } else { "OFF" }); }
+                                            if debug { println!("PS pending: OUTP {}", if on { "ON" } else { "OFF" }); }
+                                        }
+                                        if let Some(v) = changes.voltage_set {
+                                            command_queue.push_back(format!("VOLT {:.3}\n", v));
+                                            if debug { println!("PS pending: VOLT {:.3}", v); }
+                                        }
+                                        if let Some(v) = changes.current_set {
+                                            command_queue.push_back(format!("CURR {:.3}\n", v));
+                                            if debug { println!("PS pending: CURR {:.3}", v); }
+                                        }
+                                        if let Some(v) = changes.ovp {
+                                            command_queue.push_back(format!("VOLT:LIM {:.3}\n", v));
+                                            if debug { println!("PS pending: VOLT:LIM {:.3}", v); }
+                                        }
+                                        if let Some(v) = changes.ocp {
+                                            command_queue.push_back(format!("CURR:LIM {:.3}\n", v));
+                                            if debug { println!("PS pending: CURR:LIM {:.3}", v); }
+                                        }
+                                        if let Some((_idx, ref cmd)) = changes.range {
+                                            for line in cmd.lines() {
+                                                let line = line.trim();
+                                                if !line.is_empty() {
+                                                    command_queue.push_back(format!("{}\n", line));
+                                                }
+                                            }
+                                            if debug { println!("PS pending: range cmd {}", cmd.trim()); }
                                         }
                                         command_queue.push_back("OUTP?\n".to_string());
                                         // Full poll (all settings) every 10th PS poll
