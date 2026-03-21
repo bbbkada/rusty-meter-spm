@@ -193,6 +193,7 @@ impl super::MyApp {
         if let Some(ref mut rx) = self.mode_rx {
             while let Ok(mode) = rx.try_recv() {
                 if mode != self.metermode {
+                    // Instrument reported a different mode — update UI state
                     self.metermode = mode;
                     self.values = VecDeque::with_capacity(self.mem_depth);
                     self.hist_values = VecDeque::with_capacity(self.hist_mem_depth); // Reset histogram buffer
@@ -238,21 +239,27 @@ impl super::MyApp {
                     
                     // Reset curr_range to 0 (AUTO) for the new mode
                     self.curr_range = 0;
-                    
-                    // Clear pending mode change flag - mode is now confirmed by instrument
+                }
+                
+                // Always clear pending mode flags when instrument confirms — even
+                // when mode already matches self.metermode. set_mode() eagerly sets
+                // metermode, so by the time the instrument echoes the new mode back,
+                // self.metermode already equals it. Without this, pending_mode_change
+                // was never cleared, retries kept re-sending the mode command, and
+                // the instrument could briefly report the OLD mode during re-processing,
+                // causing the UI to bounce back (especially VDC ↔ VAC on SPM6103).
+                if self.pending_mode_change == Some(mode) {
+                    if self.value_debug {
+                        println!("Mode {:?} confirmed by instrument, clearing pending mode change", mode);
+                    }
                     self.pending_mode_change = None;
                     
-                    // Clear pending mode from PendingChanges so serial stops re-sending
-                    {
-                        let mut pending = self.pending_changes.lock().unwrap();
-                        if let Some((target, _, _)) = &pending.mode {
-                            if *target == mode {
-                                pending.mode = None;
-                            }
+                    let mut pending = self.pending_changes.lock().unwrap();
+                    if let Some((target, _, _)) = &pending.mode {
+                        if *target == mode {
+                            pending.mode = None;
                         }
                     }
-                    
-                    // Range index updates from instrument will now be accepted from the new mode
                 }
             }
         }

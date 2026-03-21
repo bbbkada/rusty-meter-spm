@@ -170,29 +170,31 @@ impl DevicePlugin for Xdm1041Plugin {
            unquoted == "DIOD" || unquoted == "RES" ||
            unquoted == "TEMP"
         {
-            // Extract mode string (before space or full string)
-            let mode_str = unquoted.split_whitespace().next().unwrap_or(unquoted);
-            
-            let mode = match mode_str {
-                "VOLT" | "VOLT:DC" => MeterMode::Vdc,
-                "VOLT:AC" => MeterMode::Vac,
-                "CURR" | "CURR:DC" => MeterMode::Adc,
-                "CURR:AC" => MeterMode::Aac,
-                "RES" => MeterMode::Res,
-                "CAP" => MeterMode::Cap,
-                "FREQ" => MeterMode::Freq,
-                "PER" => MeterMode::Per,
-                "TEMP" => MeterMode::Temp,
-                // Handle DIOD/CONT based on firmware version
-                "DIOD" => if swap_diod_cont { MeterMode::Cont } else { MeterMode::Diod },
-                "CONT" => if swap_diod_cont { MeterMode::Diod } else { MeterMode::Cont },
-                _ => {
-                    // Also try matching "VOLT AC" explicitly for XDM1041
-                    if unquoted == "VOLT AC" {
-                        MeterMode::Vac
-                    } else if unquoted == "CURR AC" {
-                        MeterMode::Aac
-                    } else {
+            // Check for space-separated AC/DC modes FIRST (e.g. "VOLT AC", "CURR AC").
+            // XDM1041 FUNC? can return "VOLT AC" (space-separated). Splitting by
+            // whitespace would yield "VOLT" which incorrectly maps to VDC.
+            let mode = if unquoted == "VOLT AC" || unquoted.starts_with("VOLT AC ") {
+                MeterMode::Vac
+            } else if unquoted == "CURR AC" || unquoted.starts_with("CURR AC ") {
+                MeterMode::Aac
+            } else {
+                // Extract mode string (before space or full string)
+                let mode_str = unquoted.split_whitespace().next().unwrap_or(unquoted);
+                
+                match mode_str {
+                    "VOLT" | "VOLT:DC" => MeterMode::Vdc,
+                    "VOLT:AC" => MeterMode::Vac,
+                    "CURR" | "CURR:DC" => MeterMode::Adc,
+                    "CURR:AC" => MeterMode::Aac,
+                    "RES" => MeterMode::Res,
+                    "CAP" => MeterMode::Cap,
+                    "FREQ" => MeterMode::Freq,
+                    "PER" => MeterMode::Per,
+                    "TEMP" => MeterMode::Temp,
+                    // Handle DIOD/CONT based on firmware version
+                    "DIOD" => if swap_diod_cont { MeterMode::Cont } else { MeterMode::Diod },
+                    "CONT" => if swap_diod_cont { MeterMode::Diod } else { MeterMode::Cont },
+                    _ => {
                         return ParseResult { measurement: None, mode: None, range_index: None, decimals: None };
                     }
                 }

@@ -479,6 +479,19 @@ impl super::MyApp {
 
                                                             // Handle mode update if detected
                                                             if let Some(mode) = parse_result.mode {
+                                                                // Clear pending mode retries as soon as instrument confirms the target.
+                                                                // This prevents re-sending FUNC:VOLT:AC (etc.) after the instrument
+                                                                // has already switched, which could cause it to briefly report the
+                                                                // old mode during re-processing (VDC↔VAC bounce on SPM6103).
+                                                                {
+                                                                    let mut changes = pending_changes.lock().unwrap();
+                                                                    if let Some((target, _, _)) = &changes.mode {
+                                                                        if *target == mode {
+                                                                            if debug { println!("Instrument confirmed target mode {:?}, clearing pending retries", mode); }
+                                                                            changes.mode = None;
+                                                                        }
+                                                                    }
+                                                                }
                                                                 if mode != last_mode {
                                                                     last_mode = mode;
                                                                     let _ = tx_mode.send(mode).await;
