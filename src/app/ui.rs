@@ -88,6 +88,13 @@ impl super::MyApp {
     /// Called each time the UI needs repainting, which may be many times per second.
     pub fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let is_web = cfg!(target_arch = "wasm32");
+
+        // Apply always-on-top on first frame so persisted setting takes effect
+        if !self.is_init && self.always_on_top {
+            ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(
+                egui::viewport::WindowLevel::AlwaysOnTop,
+            ));
+        }
         
         // Handle spacebar to toggle hold
         if ctx.input(|i| i.key_pressed(egui::Key::Space)) {
@@ -537,6 +544,16 @@ impl super::MyApp {
                     // Recording button
                     if ui.button("Start Recording").clicked() {
                         self.recording_open = true;
+                    }
+
+                    // Always on top toggle
+                    if ui.checkbox(&mut self.always_on_top, "Always on top").changed() {
+                        let level = if self.always_on_top {
+                            egui::viewport::WindowLevel::AlwaysOnTop
+                        } else {
+                            egui::viewport::WindowLevel::Normal
+                        };
+                        ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(level));
                     }
                 });
 

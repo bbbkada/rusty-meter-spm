@@ -88,6 +88,7 @@ pub struct MyApp {
     hist_bar_color: Color32,       // Persistent, color for histogram bars
     measurement_font_color: Color32, // Persistent, color for measurement box font
     box_background_color: Color32, // Persistent, background color for measurement, mode, and option boxes
+    always_on_top: bool,           // Persistent, keep window above all others
     #[serde(skip)]
     recording_open: bool, // Do not persist, whether recording viewport is open
     recording_format: RecordingFormat, // Persistent, selected recording format
@@ -268,6 +269,7 @@ impl Default for MyApp {
             hist_bar_color: Color32::from_rgb(0, 255, 0), // Default to green
             measurement_font_color: Color32::from_rgb(0, 255, 255), // Default to cyan
             box_background_color: Color32::from_rgba_unmultiplied(0, 0, 0, 255), // Default to black
+            always_on_top: false,  // Default to normal window
             recording_open: false, // Always start closed
             recording_format: RecordingFormat::Csv,
             recording_file_path: "".to_owned(),
