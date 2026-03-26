@@ -33,7 +33,7 @@ impl super::MyApp {
             return;
         }
 
-        let (tx_data, rx_data) = mpsc::channel::<Option<(f64, usize)>>(100);
+        let (tx_data, rx_data) = mpsc::channel::<Option<(f64, f64)>>(100);
         let (tx_cmd, mut rx_cmd) = mpsc::channel::<String>(100);
         let (tx_mode, rx_mode) = mpsc::channel::<MeterMode>(10);
         let (tx_range, rx_range) = mpsc::channel::<(MeterMode, usize)>(10);
@@ -537,10 +537,10 @@ impl super::MyApp {
 
                                                             // Handle measurement value if detected
                                                             if let Some(meas) = parse_result.measurement {
-                                                                let decimals = parse_result.decimals.unwrap_or(4);
-                                                                let _ = tx_data.send(Some((meas, decimals))).await;
+                                                                let precision = parse_result.precision.unwrap_or(0.0001);
+                                                                let _ = tx_data.send(Some((meas, precision))).await;
                                                                 if debug {
-                                                                    println!("Sent measurement: {} ({}dp) from {}", meas, decimals, trimmed);
+                                                                    println!("Sent measurement: {} (prec={}) from {}", meas, precision, trimmed);
                                                                 }
                                                                 meas_count += 1;
                                                             }

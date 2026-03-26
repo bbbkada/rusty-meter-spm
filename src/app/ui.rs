@@ -186,12 +186,12 @@ impl super::MyApp {
         // Process all available measurements
         if let Some(ref mut rx) = self.serial_rx {
             while let Ok(meas_opt) = rx.try_recv() {
-                if let Some((meas, decimals)) = meas_opt {
+                if let Some((meas, precision)) = meas_opt {
                     if self.value_debug {
-                        println!("UI received measurement: {} ({}dp)", meas, decimals);
+                        println!("UI received measurement: {} (prec={})", meas, precision);
                     }
                     self.curr_meas = meas;
-                    self.curr_decimals = decimals;
+                    self.curr_precision = precision;
                 }
             }
         }
@@ -634,7 +634,7 @@ impl super::MyApp {
                                 1_000_000.0,
                                 0.0001,
                                 &self.metermode,
-                                Some(self.curr_decimals),
+                                Some(self.curr_precision),
                             );
                             ui.label(
                                 egui::RichText::new(formatted_value)

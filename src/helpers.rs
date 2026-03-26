@@ -6,7 +6,7 @@ pub fn format_measurement(
     sci_threshold_high: f64,
     sci_threshold_low: f64,
     meter_mode: &MeterMode,
-    raw_decimals: Option<usize>,
+    precision: Option<f64>,
 ) -> (String, String) {
     if value.is_nan() {
         return ("    NaN".to_string(), "".to_string());
@@ -45,8 +45,6 @@ pub fn format_measurement(
     .to_string();
 
     // Adjust value and unit based on mode and magnitude
-    // Track how many orders of magnitude we scale, to adjust raw_decimals
-    let mut scale_decimal_adjust: usize = 0;
     match meter_mode {
         MeterMode::Vdc | MeterMode::Vac => {
             // Values stay as V — instrument already provides correct scale via SI prefix
@@ -54,7 +52,6 @@ pub fn format_measurement(
         MeterMode::Adc | MeterMode::Aac => {
             if abs_value < 1.0 {
                 display_value = value * 1000.0;
-                scale_decimal_adjust = 3;
                 display_unit = if matches!(meter_mode, MeterMode::Adc) {
                     "mADC"
                 } else {
@@ -66,11 +63,9 @@ pub fn format_measurement(
         MeterMode::Res | MeterMode::Cont => {
             if abs_value >= 1_000_000.0 {
                 display_value = value / 1_000_000.0;
-                scale_decimal_adjust = 6;
                 display_unit = "MOhm".to_string();
             } else if abs_value >= 1_000.0 {
                 display_value = value / 1_000.0;
-                scale_decimal_adjust = 3;
                 display_unit = "kOhm".to_string();
             }
             // Values < 1 Ohm stay as Ohm (e.g. 0.330 Ohm) — no mOhm scaling
@@ -78,46 +73,59 @@ pub fn format_measurement(
         MeterMode::Cap => {
             if abs_value >= 0.001 {
                 display_value = value * 1000.0;
-                scale_decimal_adjust = 3;
                 display_unit = "mF".to_string();
             } else if abs_value >= 0.000_001 {
                 display_value = value * 1_000_000.0;
-                scale_decimal_adjust = 6;
                 display_unit = "μF".to_string();
             } else {
                 // nF range, including zero
                 display_value = value * 1_000_000_000.0;
-                scale_decimal_adjust = 9;
                 display_unit = "nF".to_string();
             }
         }
         MeterMode::Per => {
             if abs_value < 1.0 {
                 display_value = value * 1000.0;
-                scale_decimal_adjust = 3;
                 display_unit = "ms".to_string();
             }
         }
         _ => {}
     }
 
-    // Adjust raw_decimals to compensate for display scaling.
-    // e.g. instrument sends +2.340nF → parsed as 0.00000000234 F with 12 decimals.
-    // We scale ×1e9 to show 2.340 nF, so subtract 9 → 3 decimals.
-    let adjusted_decimals = raw_decimals.map(|d| d.saturating_sub(scale_decimal_adjust));
-
     let abs_display_value = display_value.abs();
+
+    // Compute display decimal places from precision.
+    // Precision is the smallest resolvable step in the *base* unit (e.g. 1.0 Ohm, 0.00001 V).
+    // Convert to display unit using the ratio between base value and display value.
+    let display_decimals = precision.and_then(|p| {
+        if p <= 0.0 || !p.is_finite() {
+            return None;
+        }
+        // Compute precision in display units
+        let display_prec = if value.abs() > 1e-30 {
+            // Scale precision by the same factor as the value was scaled
+            p * (display_value / value).abs()
+        } else {
+            // Value is ~zero, no scaling was applied
+            p
+        };
+        if display_prec <= 0.0 || !display_prec.is_finite() {
+            return None;
+        }
+        let dec = (-display_prec.log10()).ceil() as i32;
+        Some(dec.max(0) as usize)
+    });
 
     // Format the value
     let formatted_value = if abs_display_value >= sci_threshold_high
         || (abs_display_value < sci_threshold_low && abs_display_value > 0.0)
     {
         format!("{:>width$.3e}", display_value, width = max_digits)
-    } else if let Some(decimals) = adjusted_decimals {
-        // Use exact decimal count from instrument
+    } else if let Some(decimals) = display_decimals {
+        // Use exact decimal count derived from instrument precision
         format!("{:>width$.*}", decimals, display_value, width = max_digits)
     } else {
-        let precision = if abs_display_value >= 1000.0 {
+        let fallback = if abs_display_value >= 1000.0 {
             2
         } else if abs_display_value >= 100.0 {
             3
@@ -126,7 +134,7 @@ pub fn format_measurement(
         } else {
             5
         };
-        format!("{:>width$.*}", precision, display_value, width = max_digits)
+        format!("{:>width$.*}", fallback, display_value, width = max_digits)
     };
 
     (formatted_value, display_unit)

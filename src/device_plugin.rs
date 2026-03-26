@@ -43,7 +43,7 @@ pub struct ParseResult {
     pub measurement: Option<f64>,
     pub mode: Option<MeterMode>,
     pub range_index: Option<usize>, // Index into RangeInfo.ranges for the current mode
-    pub decimals: Option<usize>,    // Number of decimal places in the raw measurement string
+    pub precision: Option<f64>,     // Measurement precision in base unit (e.g. 1.0 for ±1 Ohm, 0.001 for ±1 mV)
 }
 
 /// Range information for a specific mode
@@ -195,21 +195,22 @@ impl DevicePlugin for Xdm1041Plugin {
                     "DIOD" => if swap_diod_cont { MeterMode::Cont } else { MeterMode::Diod },
                     "CONT" => if swap_diod_cont { MeterMode::Diod } else { MeterMode::Cont },
                     _ => {
-                        return ParseResult { measurement: None, mode: None, range_index: None, decimals: None };
+                        return ParseResult { measurement: None, mode: None, range_index: None, precision: None };
                     }
                 }
             };
             
-            return ParseResult { measurement: None, mode: Some(mode), range_index: None, decimals: None };
+            return ParseResult { measurement: None, mode: Some(mode), range_index: None, precision: None };
         }
         
         // Try parsing direct measurement value (format: "+1.234")
         if let Ok(meas) = trimmed.parse::<f64>() {
-            let decimals = count_decimals(trimmed);
-            return ParseResult { measurement: Some(meas), mode: None, range_index: None, decimals: Some(decimals) };
+            let raw = count_decimals(trimmed);
+            let precision = 10_f64.powi(-(raw as i32)); // No SI prefix for XDM1041 raw values
+            return ParseResult { measurement: Some(meas), mode: None, range_index: None, precision: Some(precision) };
         }
         
-        ParseResult { measurement: None, mode: None, range_index: None, decimals: None }
+        ParseResult { measurement: None, mode: None, range_index: None, precision: None }
     }
     
     fn mode_command(&self, mode: MeterMode) -> String {
@@ -437,7 +438,7 @@ impl DevicePlugin for Spm6103Plugin {
         
         // SPM6103 uses comma-separated format
         if !trimmed.contains(',') {
-            return ParseResult { measurement: None, mode: None, range_index: None, decimals: None };
+            return ParseResult { measurement: None, mode: None, range_index: None, precision: None };
         }
         
         // CONFigure:ALL? format: "VOLT:DC,+0.0011V,AUTO,2V"
@@ -446,7 +447,7 @@ impl DevicePlugin for Spm6103Plugin {
         // Format is "TYPE,VALUE,STATUS,RANGE"
         let parts: Vec<&str> = trimmed.split(',').collect();
         if parts.len() < 2 {
-            return ParseResult { measurement: None, mode: None, range_index: None, decimals: None };
+            return ParseResult { measurement: None, mode: None, range_index: None, precision: None };
         }
         
         // Detect mode from the TYPE field
@@ -469,10 +470,10 @@ impl DevicePlugin for Spm6103Plugin {
         // Extract numeric value
         let value_str = parts[1].trim();
         
-        // Handle special values
-        let measurement = if value_str == "OL" || value_str.starts_with("OL") || value_str == "Open" {
+        // Handle special values and compute measurement + precision
+        let (measurement, precision) = if value_str == "OL" || value_str.starts_with("OL") || value_str == "Open" {
             // Overload/Open Load
-            Some(1e9)
+            (Some(1e9), None)
         } else {
             // Strip spaces so formats like "+0.0007 KOhm" or "+0.0007K Ohm" become "+0.0007KOhm"
             let value_clean: String = value_str.chars().filter(|c| *c != ' ').collect();
@@ -482,25 +483,13 @@ impl DevicePlugin for Spm6103Plugin {
             let numeric_part = value_clean.trim_end_matches(|c: char| c.is_alphabetic());
             let unit_suffix = &value_clean[numeric_part.len()..];
             let multiplier = extract_si_multiplier(unit_suffix);
-            numeric_part.parse::<f64>().ok().map(|v| v * multiplier)
-        };
-        
-        // Count decimals, adjusting for SI prefix conversion.
-        // e.g. "+20.44mV" has 2 raw decimals, but after milli conversion (0.02044) needs 5 decimals to preserve precision.
-        let decimals = {
-            let value_clean: String = value_str.chars().filter(|c| *c != ' ').collect();
-            let numeric_part = value_clean.trim_end_matches(|c: char| c.is_alphabetic());
-            let unit_suffix = &value_clean[numeric_part.len()..];
+            let meas = numeric_part.parse::<f64>().ok().map(|v| v * multiplier);
+            // Precision = smallest resolvable step in base unit.
+            // e.g. "+4.254KOhm": raw=3 decimals, multiplier=1000 → precision = 0.001 * 1000 = 1.0 Ohm
+            // e.g. "+20.44mV":   raw=2 decimals, multiplier=0.001 → precision = 0.01 * 0.001 = 0.00001 V
             let raw = count_decimals(numeric_part);
-            let si_extra = match extract_si_multiplier(unit_suffix) {
-                m if m <= 1e-9 + f64::EPSILON && m >= 1e-9 - f64::EPSILON => 9,  // nano
-                m if m <= 1e-6 + f64::EPSILON && m >= 1e-6 - f64::EPSILON => 6,  // micro
-                m if (m - 0.001).abs() < f64::EPSILON => 3,                       // milli
-                m if (m - 1000.0).abs() < f64::EPSILON => 0,                      // kilo (fewer decimals ok)
-                m if (m - 1e6).abs() < f64::EPSILON => 0,                         // mega
-                _ => 0,                                                           // no prefix
-            };
-            Some(raw + si_extra)
+            let prec = Some(10_f64.powi(-(raw as i32)) * multiplier);
+            (meas, prec)
         };
         
         // Extract range - check STATUS field (3rd) first for AUTO/Manual
@@ -531,7 +520,7 @@ impl DevicePlugin for Spm6103Plugin {
             None
         };
         
-        ParseResult { measurement, mode: detected_mode, range_index, decimals }
+        ParseResult { measurement, mode: detected_mode, range_index, precision }
     }
     
     fn mode_command(&self, mode: MeterMode) -> String {

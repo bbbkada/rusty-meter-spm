@@ -112,7 +112,7 @@ pub struct MyApp {
     #[serde(skip)]
     curr_meas: f64,
     #[serde(skip)]
-    curr_decimals: usize,  // Number of decimal places from instrument
+    curr_precision: f64,   // Measurement precision in base unit (e.g. 1.0 = ±1 Ohm)
     #[serde(skip)]
     curr_unit: String,
     #[serde(skip)]
@@ -150,7 +150,7 @@ pub struct MyApp {
     #[serde(skip)]
     pending_mode_change: Option<MeterMode>, // Track mode being changed to, ignore range updates during transition
     #[serde(skip)]
-    serial_rx: Option<mpsc::Receiver<Option<(f64, usize)>>>, // handle measurements (value, decimals)
+    serial_rx: Option<mpsc::Receiver<Option<(f64, f64)>>>, // handle measurements (value, precision)
     #[serde(skip)]
     serial_tx: Option<mpsc::Sender<String>>, // channel for sending commands to serial task
     #[serde(skip)]
@@ -244,7 +244,7 @@ impl Default for MyApp {
             scpimode: ScpiMode::Idn,
             confstring: "".to_owned(),
             curr_meas: f64::NAN,
-            curr_decimals: 4,
+            curr_precision: 0.0001, // Default precision: 0.1 mV
             curr_unit: "VDC".to_owned(),
             issue_new_write: false,
             readbuf: [0u8; 1024],
