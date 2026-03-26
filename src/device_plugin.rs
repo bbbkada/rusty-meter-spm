@@ -13,7 +13,7 @@ fn count_decimals(s: &str) -> usize {
 }
 
 /// Extract SI prefix multiplier from a unit suffix string.
-/// e.g. "mV" -> 0.001, "kOhm" -> 1000, "nF" -> 1e-9, "V" -> 1.0, "MOhm" -> 1e6
+/// e.g. "mV" -> 0.001, "kOhm" -> 1000, "KOhm" -> 1000, "nF" -> 1e-9, "V" -> 1.0, "MOhm" -> 1e6
 fn extract_si_multiplier(unit_suffix: &str) -> f64 {
     if unit_suffix.is_empty() {
         return 1.0;
@@ -27,7 +27,7 @@ fn extract_si_multiplier(unit_suffix: &str) -> f64 {
             // Since unit_suffix comes after numeric part, "mV" = milli, "mA" = milli
             0.001
         }
-        'k' => 1e3,        // kilo: kOhm, kHz
+        'k' | 'K' => 1e3,  // kilo: kOhm, KOhm — SPM6103 uses uppercase K (2KΩ, 20KΩ)
         'M' => {
             // Mega: MOhm (but not "mV" which starts lowercase)
             1e6
@@ -474,11 +474,13 @@ impl DevicePlugin for Spm6103Plugin {
             // Overload/Open Load
             Some(1e9)
         } else {
+            // Strip spaces so formats like "+0.0007 KOhm" or "+0.0007K Ohm" become "+0.0007KOhm"
+            let value_clean: String = value_str.chars().filter(|c| *c != ' ').collect();
             // Extract unit suffix and apply SI prefix to convert to base unit.
             // e.g. "+20.44mV" -> numeric=20.44, unit="mV", multiplier=0.001 -> 0.02044 V
             // This ensures graphs and recordings always use base units.
-            let numeric_part = value_str.trim_end_matches(|c: char| c.is_alphabetic());
-            let unit_suffix = &value_str[numeric_part.len()..];
+            let numeric_part = value_clean.trim_end_matches(|c: char| c.is_alphabetic());
+            let unit_suffix = &value_clean[numeric_part.len()..];
             let multiplier = extract_si_multiplier(unit_suffix);
             numeric_part.parse::<f64>().ok().map(|v| v * multiplier)
         };
@@ -486,8 +488,9 @@ impl DevicePlugin for Spm6103Plugin {
         // Count decimals, adjusting for SI prefix conversion.
         // e.g. "+20.44mV" has 2 raw decimals, but after milli conversion (0.02044) needs 5 decimals to preserve precision.
         let decimals = {
-            let numeric_part = value_str.trim_end_matches(|c: char| c.is_alphabetic());
-            let unit_suffix = &value_str[numeric_part.len()..];
+            let value_clean: String = value_str.chars().filter(|c| *c != ' ').collect();
+            let numeric_part = value_clean.trim_end_matches(|c: char| c.is_alphabetic());
+            let unit_suffix = &value_clean[numeric_part.len()..];
             let raw = count_decimals(numeric_part);
             let si_extra = match extract_si_multiplier(unit_suffix) {
                 m if m <= 1e-9 + f64::EPSILON && m >= 1e-9 - f64::EPSILON => 9,  // nano
