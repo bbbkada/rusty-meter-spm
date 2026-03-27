@@ -12,8 +12,8 @@ use mio::{Events, Poll};
 use mio_serial::{SerialPortInfo, SerialStream};
 use tokio::sync::{mpsc, oneshot};
 
-use crate::multimeter::{DeviceType, MeterMode, RateCmd, ScpiMode};
-use crate::device_plugin::PowerSupplyState;
+use crate::multimeter::MeterMode;
+use crate::plugins::{DevicePlugin, PowerSupplyState};
 
 // Submodules for split impl blocks
 mod graph;
@@ -77,9 +77,9 @@ pub struct MyApp {
     poll_interval_ms: u64,
     graph_update_interval_ms: u64, // Persistent, adjustable via slider in main GUI
     graph_update_interval_max: u64, // Persistent, maximum for graph update interval slider
-    beeper_enabled: bool,          // New field for beeper state, persistent
-    cont_threshold: u32,           // Persistent continuity threshold (0-1000 ohms)
-    diod_threshold: f32,           // Persistent diode threshold (0-3.0 volts)
+    beeper_enabled: bool,          // Persistent beeper state
+    cont_threshold: u32,           // Persistent continuity threshold (0–1000 ohms)
+    diod_threshold: f32,           // Persistent diode threshold (0–3.0 volts)
     lock_remote: bool,             // Persistent, whether to lock meter in remote mode
     hold_enabled: bool,            // Persistent, whether hold mode is enabled
     curr_rate: usize,              // Persistent, current sampling rate index
@@ -106,8 +106,6 @@ pub struct MyApp {
     #[serde(skip)]
     metermode: MeterMode,
     #[serde(skip)]
-    scpimode: ScpiMode,
-    #[serde(skip)]
     confstring: String,
     #[serde(skip)]
     curr_meas: f64,
@@ -132,9 +130,9 @@ pub struct MyApp {
     #[serde(skip)]
     serial: Option<SerialStream>,
     #[serde(skip)]
-    device: Arc<Mutex<String>>, // Changed to shared ownership
+    device: Arc<Mutex<String>>, // Device IDN string (shared with serial task)
     #[serde(skip)]
-    device_type: Arc<Mutex<DeviceType>>, // Detected device type for command routing
+    plugin: Arc<Mutex<Box<dyn DevicePlugin>>>, // Active device plugin (shared with serial task)
     #[serde(skip)]
     ports: Vec<SerialPortInfo>,
     #[serde(skip)]
@@ -143,8 +141,6 @@ pub struct MyApp {
     settings_open: bool,
     #[serde(skip)]
     is_init: bool,
-    #[serde(skip)]
-    ratecmd: RateCmd,
     #[serde(skip)]
     curr_range: usize,
     #[serde(skip)]
@@ -186,7 +182,7 @@ pub struct MyApp {
     #[serde(skip)]
     ps_output_on: bool,
     #[serde(skip)]
-    pending_changes: Arc<Mutex<crate::device_plugin::PendingChanges>>,  // Shared pending GUI changes
+    pending_changes: Arc<Mutex<crate::plugins::PendingChanges>>,  // Shared pending GUI changes
     ps_voltage_set: f64,      // Persistent: user's desired voltage
     ps_current_set: f64,      // Persistent: user's desired current
     ps_ovp: f64,              // Persistent: overvoltage protection
@@ -212,7 +208,7 @@ pub struct MyApp {
     #[serde(skip)]
     ps_input_has_focus: bool,  // True if any PS text input had focus last frame
     #[serde(skip)]
-    ps_confirmed_non_spm: bool, // Set to true when connected device is confirmed as non-SPM
+    ps_confirmed_non_ps: bool, // Set to true when connected device confirmed to have no PS
 }
 
 // Enum to track connection state
@@ -231,82 +227,80 @@ impl Default for MyApp {
             bits: 8,
             stop_bits: 1,
             parity: false,
-            mem_depth: MEM_DEPTH_DEFAULT, // Default slider value: 100
-            mem_depth_max: MEM_DEPTH_MAX_DEFAULT, // Default max: 2000
-            hist_mem_depth: HIST_MEM_DEPTH_DEFAULT, // Default histogram memory depth: 1000
-            hist_mem_depth_max: HIST_MEM_DEPTH_MAX_DEFAULT, // Default max: 10000
-            hist_collect_interval_ms: 100, // Default to 100ms
-            hist_collect_active: false,   // Default to stopped
+            mem_depth: MEM_DEPTH_DEFAULT,
+            mem_depth_max: MEM_DEPTH_MAX_DEFAULT,
+            hist_mem_depth: HIST_MEM_DEPTH_DEFAULT,
+            hist_mem_depth_max: HIST_MEM_DEPTH_MAX_DEFAULT,
+            hist_collect_interval_ms: 100,
+            hist_collect_active: false,
             connect_on_startup: false,
             value_debug: false,
-            curr_meter: "OWON XDM1041".to_owned(),
+            curr_meter: "".to_owned(),
             metermode: MeterMode::Vdc,
-            scpimode: ScpiMode::Idn,
             confstring: "".to_owned(),
             curr_meas: f64::NAN,
-            curr_precision: 0.0001, // Default precision: 0.1 mV
+            curr_precision: 0.0001,
             curr_unit: "VDC".to_owned(),
             issue_new_write: false,
             readbuf: [0u8; 1024],
             portlist: VecDeque::with_capacity(11),
             values: VecDeque::with_capacity(MEM_DEPTH_DEFAULT + 1),
-            hist_values: VecDeque::with_capacity(MEM_DEPTH_DEFAULT + 1), // Initialize histogram buffer
+            hist_values: VecDeque::with_capacity(MEM_DEPTH_DEFAULT + 1),
             poll: Poll::new().unwrap(),
             events: Events::with_capacity(1),
             serial: None,
-            device: Arc::new(Mutex::new("".to_owned())), // Initialize as shared
-            device_type: Arc::new(Mutex::new(DeviceType::Unknown)), // Initialize as Unknown
+            device: Arc::new(Mutex::new("".to_owned())),
+            plugin: Arc::new(Mutex::new(crate::plugins::default_plugin())),
             ports: vec![],
             tempdir: tempfile::Builder::new().prefix("rustymeter").tempdir().ok(),
             settings_open: false,
             is_init: false,
-            ratecmd: RateCmd::default(),
             curr_rate: 0,
             curr_range: 0,
             pending_mode_change: None,
-            reverse_graph: false, // Default to right-to-left (most recent on right)
-            graph_line_color: Color32::from_rgb(0, 255, 255), // Default to cyan (#00FFFF)
-            hist_bar_color: Color32::from_rgb(0, 255, 0), // Default to green
-            measurement_font_color: Color32::from_rgb(0, 255, 255), // Default to cyan
-            box_background_color: Color32::from_rgba_unmultiplied(0, 0, 0, 255), // Default to black
-            always_on_top: false,  // Default to normal window
-            recording_open: false, // Always start closed
+            reverse_graph: false,
+            graph_line_color: Color32::from_rgb(0, 255, 255),
+            hist_bar_color: Color32::from_rgb(0, 255, 0),
+            measurement_font_color: Color32::from_rgb(0, 255, 255),
+            box_background_color: Color32::from_rgba_unmultiplied(0, 0, 0, 255),
+            always_on_top: false,
+            recording_open: false,
             recording_format: RecordingFormat::Csv,
             recording_file_path: "".to_owned(),
             recording_mode: RecordingMode::FixedInterval,
-            recording_interval_ms: 1000, // Default to 1 second
+            recording_interval_ms: 1000,
             recording_active: false,
-            recording_timestamp_format: TimestampFormat::Rfc3339, // Default to RFC3339
-            recording_data: vec![],                               // Initialize empty, not persisted
-            recording_data_len: 0, // Initialize to 0, tracks length of recording_data
+            recording_timestamp_format: TimestampFormat::Rfc3339,
+            recording_data: vec![],
+            recording_data_len: 0,
             serial_rx: None,
             serial_tx: None,
-            shutdown_tx: None, // Initially no shutdown signal
-            mode_rx: None,     // Initially no mode update channel
-            range_rx: None,    // Initially no range update channel
+            shutdown_tx: None,
+            mode_rx: None,
+            range_rx: None,
             poll_interval_ms: 20,
-            graph_update_interval_ms: 20, // Default to 20ms for ~50 FPS
-            graph_update_interval_max: 1000, // Default maximum of 1000ms
-            beeper_enabled: true,         // Default to on, per meter spec
-            cont_threshold: 50,           // Default continuity threshold: 50 ohms
-            diod_threshold: 2.0,          // Default diode threshold: 2.0 volts (mid-range)
-            hold_enabled: false,          // Default hold off
-            lock_remote: true,            // Default to locking remote mode
+            graph_update_interval_ms: 20,
+            graph_update_interval_max: 1000,
+            beeper_enabled: true,
+            cont_threshold: 50,
+            diod_threshold: 2.0,
+            hold_enabled: false,
+            lock_remote: true,
             value_debug_shared: Arc::new(Mutex::new(false)),
             poll_interval_shared: Arc::new(Mutex::new(20)),
-            hold_enabled_shared: Arc::new(Mutex::new(false)), // Default hold off
-            graph_update_interval_shared: Arc::new(Mutex::new(20)), // Default shared value to 20ms
-            last_graph_update: 0.0,                                 // Initialize to 0
-            last_hist_collect_time: 0.0,                            // Initialize to 0
-            connection_state: ConnectionState::Disconnected,        // Initially disconnected
-            connection_error: None,                                 // No error initially
-            meas_count: 0,         // Initialize measurement counter
-            last_record_time: 0.0, // Initialize last recording time
-            graph_config: graph::GraphConfig::default(), // Default graph config
-            plot_dock_state: DockState::new(vec![]), // Initialize empty, populated in update
+            hold_enabled_shared: Arc::new(Mutex::new(false)),
+            graph_update_interval_shared: Arc::new(Mutex::new(20)),
+            last_graph_update: 0.0,
+            last_hist_collect_time: 0.0,
+            connection_state: ConnectionState::Disconnected,
+            connection_error: None,
+            meas_count: 0,
+            last_record_time: 0.0,
+            graph_config: graph::GraphConfig::default(),
+            plot_dock_state: DockState::new(vec![]),
             // Power supply defaults
             ps_output_on: false,
-            pending_changes: Arc::new(Mutex::new(crate::device_plugin::PendingChanges::default())),
+            pending_changes: Arc::new(Mutex::new(crate::plugins::PendingChanges::default())),
             ps_voltage_set: 5.0,
             ps_current_set: 1.0,
             ps_ovp: 32.0,
@@ -321,7 +315,7 @@ impl Default for MyApp {
             ps_ovp_input: "32.000".to_string(),
             ps_ocp_input: "3.200".to_string(),
             ps_input_has_focus: false,
-            ps_confirmed_non_spm: false,
+            ps_confirmed_non_ps: false,
         }
     }
 }
@@ -329,8 +323,6 @@ impl Default for MyApp {
 impl MyApp {
     /// Called once before the first frame.
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        // This is also where you can customize the look and feel of egui using
-        // `cc.egui_ctx.set_visuals` and `cc.egui_ctx.set_fonts`.
         let mut fonts = FontDefinitions::default();
 
         fonts.font_data.insert(
@@ -349,8 +341,6 @@ impl MyApp {
 
         cc.egui_ctx.set_fonts(fonts);
 
-        // Load previous app state (if any).
-        // Note that you must enable the `persistence` feature for this to work.
         if let Some(storage) = cc.storage {
             let app: MyApp = eframe::get_value(storage, eframe::APP_KEY).unwrap_or_default();
             *app.value_debug_shared.lock().unwrap() = app.value_debug;
@@ -373,106 +363,95 @@ impl MyApp {
         tokio::spawn(async move {
             loop {
                 let interval = *graph_update_interval_shared.lock().unwrap();
-                ctx.request_repaint(); // Trigger a repaint to update the graph
+                ctx.request_repaint();
                 tokio::time::sleep(Duration::from_millis(interval)).await;
             }
         });
     }
 
-    fn set_mode(
-        &mut self,
-        mode: MeterMode,
-        unit: &str,
-        _legacy_cmd: &str, // Keep for backward compatibility but unused
-        _range_type: Option<&str>, // Not used anymore - ranges from device_plugin
-        beeper_enabled: Option<bool>,
-        _saved_range_idx: Option<usize>, // Kept for backward compatibility; range now sent from ui.rs
-    ) {
-        self.pending_mode_change = Some(mode); // Mark mode change as pending
+    /// Set meter mode — queries plugin for all SCPI commands.
+    fn set_mode(&mut self, mode: MeterMode) {
+        let plugin = self.plugin.lock().unwrap();
+        let unit = plugin.mode_unit(mode).to_owned();
+        let mode_cmd = plugin.mode_command(mode);
+        let caps = plugin.capabilities().clone();
+        drop(plugin);
+
+        self.pending_mode_change = Some(mode);
         self.metermode = mode;
-        self.curr_unit = unit.to_owned();
-        
-        // Reset curr_range to 0 (AUTO) when changing modes
-        // Instrument will report actual range after mode change completes
-        self.curr_range = 0;
-        
-        let device_type = self.device_type.lock().unwrap();
-        let mode_cmd = device_type.mode_cmd(mode);
-        let supports_beeper = device_type.plugin().supports_beeper();
-        let supports_threshold = device_type.plugin().supports_threshold();
-        drop(device_type); // Release the lock
-        
+        self.curr_unit = unit;
+        self.curr_range = 0; // Reset to AUTO/first range
         self.confstring = mode_cmd.clone();
-        
-        // Set pending mode change — serial task will send and re-send until instrument confirms
-        self.pending_changes.lock().unwrap().mode = Some((mode, mode_cmd.clone(), 5));
-        
-        // Beeper/threshold are best-effort, send once via channel
-        if let Some(beep) = beeper_enabled {
+
+        // Set pending mode change — serial task will send and retry until instrument confirms
+        self.pending_changes.lock().unwrap().mode = Some((mode, mode_cmd, 5));
+
+        // Send beeper/threshold for Diod and Cont modes (best-effort, via channel)
+        if mode == MeterMode::Diod || mode == MeterMode::Cont {
             if let Some(tx) = self.serial_tx.clone() {
-                let value_debug = self.value_debug;
-                let cont_threshold = self.cont_threshold;
-                let diod_threshold = self.diod_threshold;
-                let beeper_cmd = if supports_beeper {
-                    if beep {
-                        Some("SYST:BEEP:STATe ON\n".to_string())
-                    } else {
-                        Some("SYST:BEEP:STATe OFF\n".to_string())
-                    }
+                let plugin = self.plugin.lock().unwrap();
+                let beeper_cmd = if caps.has_beeper {
+                    plugin.beeper_command(self.beeper_enabled)
                 } else {
                     None
                 };
-                let threshold_cmd = if supports_threshold {
+                let threshold_cmd = if caps.has_threshold {
                     if mode == MeterMode::Cont {
-                        Some(format!("CONT:THREshold {}\n", cont_threshold))
+                        plugin.cont_threshold_command(self.cont_threshold)
                     } else {
-                        Some(format!("DIOD:THREshold {}\n", diod_threshold))
+                        plugin.diod_threshold_command(self.diod_threshold)
                     }
                 } else {
                     None
                 };
+                drop(plugin);
+
+                let value_debug = self.value_debug;
                 tokio::spawn(async move {
                     if let Some(cmd) = beeper_cmd {
-                        if let Err(e) = tx.send(cmd.clone()).await {
+                        if let Err(e) = tx.send(cmd).await {
                             if value_debug { println!("Failed to queue beeper command: {}", e); }
                         }
                     }
                     if let Some(cmd) = threshold_cmd {
-                        if let Err(e) = tx.send(cmd.clone()).await {
+                        if let Err(e) = tx.send(cmd).await {
                             if value_debug { println!("Failed to queue threshold command: {}", e); }
                         }
                     }
                 });
             }
         }
+
         self.values = VecDeque::with_capacity(self.mem_depth);
-        self.hist_values = VecDeque::with_capacity(self.hist_mem_depth); // Reset histogram buffer
+        self.hist_values = VecDeque::with_capacity(self.hist_mem_depth);
     }
 
     // Method to handle disconnection
     fn disconnect(&mut self) {
         if let Some(shutdown_tx) = self.shutdown_tx.take() {
-            let _ = shutdown_tx.send(()); // Signal the serial task to shut down
+            let _ = shutdown_tx.send(());
         }
-        self.serial_tx = None; // Drop sender to stop sending commands
-        self.serial_rx = None; // Drop receiver to stop receiving measurements
-        self.mode_rx = None; // Drop mode receiver
-        self.ps_rx = None; // Drop PS receiver
-        self.serial = None; // Clear serial port
+        self.serial_tx = None;
+        self.serial_rx = None;
+        self.mode_rx = None;
+        self.ps_rx = None;
+        self.serial = None;
         self.connection_state = ConnectionState::Disconnected;
-        self.connection_error = None; // Clear any previous error
+        self.connection_error = None;
         let mut device = self.device.lock().unwrap();
-        *device = "".to_owned(); // Clear device string
-        self.curr_meas = f64::NAN; // Reset measurement
-        self.values.clear(); // Clear graph data
-        self.hist_values.clear(); // Clear histogram data
-        self.meas_count = 0; // Reset measurement counter
-        self.ps_output_on = false; // Reset PS state
-        self.ps_voltage_readback = 0.0; // Reset readback
+        *device = "".to_owned();
+        // Reset plugin to default
+        *self.plugin.lock().unwrap() = crate::plugins::default_plugin();
+        self.curr_meas = f64::NAN;
+        self.values.clear();
+        self.hist_values.clear();
+        self.meas_count = 0;
+        self.ps_output_on = false;
+        self.ps_voltage_readback = 0.0;
         self.ps_current_readback = 0.0;
         self.ps_power_readback = 0.0;
-        self.ps_initial_sync_done = false; // Reset PS sync flag
-        self.ps_confirmed_non_spm = false; // Reset PS visibility flag
-        *self.pending_changes.lock().unwrap() = crate::device_plugin::PendingChanges::default(); // Clear pending changes
+        self.ps_initial_sync_done = false;
+        self.ps_confirmed_non_ps = false;
+        *self.pending_changes.lock().unwrap() = crate::plugins::PendingChanges::default();
     }
 }

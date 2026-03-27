@@ -29,6 +29,7 @@ pub fn format_measurement(
 
     let abs_value = value.abs();
     let mut display_value = value;
+    let mut scale_factor: f64 = 1.0; // Tracks how display_value relates to base value
     let mut display_unit = match meter_mode {
         MeterMode::Vdc => "VDC",
         MeterMode::Vac => "VAC",
@@ -52,6 +53,7 @@ pub fn format_measurement(
         MeterMode::Adc | MeterMode::Aac => {
             if abs_value < 1.0 {
                 display_value = value * 1000.0;
+                scale_factor = 1000.0;
                 display_unit = if matches!(meter_mode, MeterMode::Adc) {
                     "mADC"
                 } else {
@@ -63,9 +65,11 @@ pub fn format_measurement(
         MeterMode::Res | MeterMode::Cont => {
             if abs_value >= 1_000_000.0 {
                 display_value = value / 1_000_000.0;
+                scale_factor = 1.0 / 1_000_000.0;
                 display_unit = "MOhm".to_string();
             } else if abs_value >= 1_000.0 {
                 display_value = value / 1_000.0;
+                scale_factor = 1.0 / 1_000.0;
                 display_unit = "kOhm".to_string();
             }
             // Values < 1 Ohm stay as Ohm (e.g. 0.330 Ohm) — no mOhm scaling
@@ -73,19 +77,23 @@ pub fn format_measurement(
         MeterMode::Cap => {
             if abs_value >= 0.001 {
                 display_value = value * 1000.0;
+                scale_factor = 1000.0;
                 display_unit = "mF".to_string();
             } else if abs_value >= 0.000_001 {
                 display_value = value * 1_000_000.0;
+                scale_factor = 1_000_000.0;
                 display_unit = "μF".to_string();
             } else {
                 // nF range, including zero
                 display_value = value * 1_000_000_000.0;
+                scale_factor = 1_000_000_000.0;
                 display_unit = "nF".to_string();
             }
         }
         MeterMode::Per => {
             if abs_value < 1.0 {
                 display_value = value * 1000.0;
+                scale_factor = 1000.0;
                 display_unit = "ms".to_string();
             }
         }
@@ -96,19 +104,13 @@ pub fn format_measurement(
 
     // Compute display decimal places from precision.
     // Precision is the smallest resolvable step in the *base* unit (e.g. 1.0 Ohm, 0.00001 V).
-    // Convert to display unit using the ratio between base value and display value.
+    // Convert to display unit using the tracked scale_factor.
     let display_decimals = precision.and_then(|p| {
         if p <= 0.0 || !p.is_finite() {
             return None;
         }
-        // Compute precision in display units
-        let display_prec = if value.abs() > 1e-30 {
-            // Scale precision by the same factor as the value was scaled
-            p * (display_value / value).abs()
-        } else {
-            // Value is ~zero, no scaling was applied
-            p
-        };
+        // Scale precision by the same factor applied to display_value
+        let display_prec = p * scale_factor.abs();
         if display_prec <= 0.0 || !display_prec.is_finite() {
             return None;
         }
